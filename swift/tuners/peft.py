@@ -312,8 +312,8 @@ def hot_patch_peft_module():
 
     # Support type conversion
     def init(self, model: torch.nn.Module, config: Dict[str, LoraConfig], adapter_name):
-        if isinstance(config, dict) and config.get('default') and isinstance(
-                getattr(config['default'], 'target_modules', None), str):
+        if isinstance(config, dict) and config.get('default', config.get('default-lora')) and isinstance(
+                getattr(config.get('default', config.get('default-lora')), 'target_modules', None), str):
             # Make sure the regex can find all linear in the module.
             LoraModel._create_and_replace = _create_and_replace_hook2
 
