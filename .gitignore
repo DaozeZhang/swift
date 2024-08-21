@@ -1,4 +1,6 @@
 # Byte-compiled / optimized / DLL files
+tmp
+*.ttf
 __pycache__/
 *.py[cod]
 *$py.class
@@ -127,6 +129,8 @@ result.mp4
 output/
 eval_outputs/
 *.out
+benchmarks/
+eval_outputs/
 
 # Pytorch
 *.pth
