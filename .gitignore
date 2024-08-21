@@ -125,6 +125,7 @@ result.png
 result.jpg
 result.mp4
 output/
+eval_outputs/
 *.out
 
 # Pytorch

@@ -820,10 +820,10 @@ class LlavaNextForConditionalGeneration(LlavaNextPreTrainedModel):
             
                 image_features = torch.split(image_features, image_num_patches, dim=0)
 
-                if torch.isnan(image_features[0]).any():
-                    raise ValueError(f"image_features[0] contains NaN values.")
-                if torch.isnan(image_features[1]).any():
-                    raise ValueError(f"image_features[1] contains NaN values.")
+                # if torch.isnan(image_features[0]).any():
+                #     raise ValueError(f"image_features[0] contains NaN values.")
+                # if torch.isnan(image_features[1]).any():
+                #     raise ValueError(f"image_features[1] contains NaN values.")
 
                 # NOTE we only support multimodal_patch_merge_type == "spatial_unpad"
 
