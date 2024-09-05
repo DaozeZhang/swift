@@ -1,11 +1,12 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import inspect
+import os
 import re
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial, wraps
 from types import MethodType
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypeVar, Union
 
 import json
 import torch
@@ -22,7 +23,7 @@ from swift.llm.agent.utils import calculate_loss_scale, get_tools_prompt
 from swift.torchacc_utils import pad_and_split_batch
 from swift.utils import get_dist_setting, get_logger, upper_bound, use_torchacc
 from .vision_utils import (load_audio_qwen, load_batch, load_image, load_video_cogvlm2, load_video_internvl,
-                           load_video_llava, load_video_minicpmv, rescale_image, transform_image)
+                           load_video_llava, load_video_minicpmv, load_video_qwen2, rescale_image, transform_image)
 
 logger = get_logger()
 
@@ -47,6 +48,7 @@ class TemplateType:
     qwen_audio = 'qwen-audio'
     qwen2_audio = 'qwen2-audio'
     qwen2_audio_generation = 'qwen2-audio-generation'
+    qwen2_vl = 'qwen2-vl'
     modelscope_agent = 'modelscope-agent'
     baichuan = 'baichuan'
     chatglm2 = 'chatglm2'
@@ -91,6 +93,7 @@ class TemplateType:
     florence = 'florence'
     yi = 'yi'
     yi1_5 = 'yi1_5'
+    yi_coder = 'yi-coder'
     yi_vl = 'yi-vl'
     yuan = 'yuan'
     xverse = 'xverse'
@@ -283,6 +286,7 @@ class Template:
         self.max_length = max_length
         self.truncation_strategy = truncation_strategy
         self.model = model
+        self.ref_model = kwargs.get('ref_model', None)
         self.use_loss_scale = kwargs.get('use_loss_scale', False)
         self.response_loss_scale_map = kwargs.get('loss_scale_map', None)
         self.query_loss_scale_map = None
@@ -303,6 +307,12 @@ class Template:
 
     @contextmanager
     def training_context(self):
+        if self.model is None:
+            self._is_training = True
+            yield
+            self._is_training = False
+            return
+
         self._is_training = True
 
         def _pre_forward_hook(module, args, kwargs):
@@ -326,6 +336,8 @@ class Template:
         deepspeed = None
         if 'with_kwargs' in parameters:
             handle = self.model.register_forward_pre_hook(_pre_forward_hook, with_kwargs=True)
+            if self.ref_model:
+                handle2 = self.ref_model.register_forward_pre_hook(_pre_forward_hook, with_kwargs=True)
             if is_deepspeed_zero3_enabled():
                 import deepspeed
                 _old_initialize = deepspeed.initialize
@@ -334,6 +346,8 @@ class Template:
                 def _initialize(*args, **kwargs):
                     res = _old_initialize(*args, **kwargs)
                     self.model._forward_pre_hooks.move_to_end(handle.id)
+                    if self.ref_model:
+                        self.ref_model._forward_pre_hooks.move_to_end(handle2.id)
                     return res
 
                 deepspeed.initialize = _initialize
@@ -393,7 +407,7 @@ class Template:
                     example[media_key] = [m for m in example[media_key] if m]
                     num_media = len(example[media_key])
                     num_new_tags = num_media - num_media_tags
-                    assert num_new_tags >= 0, (f'Number of media: {num_media}, number of media_tags: {num_media_tags}')
+                    assert num_new_tags >= 0, f'Number of media: {num_media}, number of media_tags: {num_media_tags}'
                     if history:
                         history[0][0] = media_tag * num_new_tags + history[0][0]
                     else:
@@ -402,14 +416,7 @@ class Template:
         example['query'] = query
         example['history'] = history
 
-    def _preprocess_media(self, example):
-        from .media import MediaTag
-        # Format media_keys to list
-        for media_key in MediaTag.media_keys.values():
-            if example.get(media_key) and not isinstance(example[media_key], (tuple, list)):
-                # change images field to list
-                example[media_key] = [example[media_key]]
-
+    def replace_media_tags(self, example) -> None:
         # Parse <img></img> format images and merged into images key
         if self.is_multimodal in {True, None}:  # If False, do not perform replace_img_tag
             example['query'], example['history'], images_path = replace_img_tag(
@@ -430,6 +437,16 @@ class Template:
 
                 example[k] = example.get(k) or [] + medias_path
 
+    def _preprocess_media(self, example):
+        from .media import MediaTag
+        from .client_utils import decode_base64
+        # Format media_keys to list
+        for media_key in MediaTag.media_keys.values():
+            if example.get(media_key) and not isinstance(example[media_key], (tuple, list)):
+                # change images field to list
+                example[media_key] = [example[media_key]]
+
+        self.replace_media_tags(example)
         # Add default tags to examples to note where to put the medias into the sequence
         self.add_default_tags(example)
 
@@ -455,6 +472,8 @@ class Template:
         if images:
             if example.get('objects') or self.load_medias or self._is_lmdeploy or self._is_vllm:
                 images = load_batch(images, load_image)
+            if not self.load_medias:
+                images = decode_base64(images=images)['images']
             if example.get('objects'):
                 # Normalize grounding bboxes
                 self.normalize_bbox(example['objects'], images, to_type=self.grounding_type)
@@ -789,6 +808,19 @@ class Template:
             loss_scale.extend([loss_weight] * len(token_list))
         return input_ids, labels, loss_scale, tokenizer_kwargs
 
+    @staticmethod
+    def use_dynamic_eos(labels: List[int], suffix_tokens_id: List[int]) -> None:
+        suffix_len = len(suffix_tokens_id)
+        start = 0
+        for i in range(1, len(labels)):
+            if labels[i - 1] >= 0 and labels[i] == -100:
+                start = i
+            if start > 0 and labels[i - 1] == -100 and labels[i] >= 0:
+                # [0, 1, 2, -100(start), -100, 3(i), 4]
+                length = i - start
+                if length >= suffix_len:
+                    labels[start:start + suffix_len] = suffix_tokens_id
+
     def _concat_and_tokenize(self,
                              query: str,
                              query_role: str,
@@ -823,18 +855,10 @@ class Template:
         history.append([query, response])
         history_roles.append([query_role, 'assistant'])
 
-        # Set the loss_scale of chat_sep or suffix to 1 if efficient_eos.
-        efficient_eos = False
-        if self.chat_sep is not None and len(self.chat_sep) > 0:
-            if isinstance(self.chat_sep[0], str) and isinstance(self.suffix[0], str) and self.chat_sep[0].startswith(
-                    self.suffix[0]):
-                efficient_eos = True
-            elif isinstance(self.chat_sep[0], list) and self.chat_sep[0] == self.suffix[0]:
-                efficient_eos = True
-
         for i, ((q, r), (qr, rr)) in enumerate(zip(history, history_roles)):
             context_list = self.tool_prompt.copy() if qr == 'tool' else prompt.copy()
             extra_context_list = []
+            is_suffix = False
             if i < len(history) - 1:
                 context_list = [context for context in context_list if '{{SYSTEM}}' not in context]
                 context_list.append('{{RESPONSE}}')
@@ -844,14 +868,16 @@ class Template:
                 # last response
                 context_list.append('{{RESPONSE}}')
                 extra_context_list = self.suffix
-                efficient_eos = True
+                is_suffix = True
             if q or r:
                 self._concat_context_list(
                     context_list, res_context_list, loss_scale_list, query=q, response=r, system=system, round0=i)
                 res_context_list += extra_context_list
-                loss_scale_list += ([1.] if efficient_eos else [0.]) * len(extra_context_list)
+                loss_scale_list += ([1.] if is_suffix else [0.]) * len(extra_context_list)
         res_context_list, loss_scale_list = self._simplify_context_list(res_context_list, loss_scale_list, **kwargs)
         input_ids, labels, loss_scale, tokenizer_kwargs = self._encode_context_list(res_context_list, loss_scale_list)
+        if labels is not None:
+            self.use_dynamic_eos(labels, self._encode_context_list(self.suffix)[0])
 
         if response is None:
             labels = None
@@ -994,9 +1020,17 @@ class Template:
             res['pixel_values_videos'] = torch.concat(pixel_values_videos)
         return res
 
+    @classmethod
+    def get_generate_ids(cls, generate_ids: Tensor, input_token_len: int) -> List[int]:
+        if isinstance(generate_ids, Tensor):
+            generate_ids = generate_ids.tolist()
+        if len(generate_ids) >= 1 and isinstance(generate_ids[0], (list, tuple)):
+            generate_ids = generate_ids[0]
+        return cls._get_generate_ids(generate_ids, input_token_len)
+
     @staticmethod
-    def get_generate_ids(generate_ids: Tensor, input_token_len: int) -> List[int]:
-        return generate_ids[0, input_token_len:].tolist()
+    def _get_generate_ids(generate_ids: List[int], input_token_len: int) -> List[int]:
+        return generate_ids[input_token_len:]
 
     @staticmethod
     def _is_chinese_char(cp: int) -> bool:
@@ -1282,6 +1316,113 @@ class Qwen2AudioGenerationTemplate(_Qwen2AudioTemplateMixin, DefaultGenerationTe
 
 register_template(TemplateType.qwen2_audio, Qwen2AudioTemplate(), lazy_tokenize=True)
 
+
+def _process_image_qwen(image):
+    from qwen_vl_utils.vision_process import IMAGE_FACTOR, MIN_PIXELS, MAX_PIXELS, smart_resize
+    size_factor = get_env_args('size_factor', int, IMAGE_FACTOR)
+    # resize
+    resized_height = get_env_args('resized_height', int, None)
+    resized_width = get_env_args('resized_width', int, None)
+    if resized_height and resized_width:
+        resized_height, resized_width = smart_resize(
+            resized_height,
+            resized_width,
+            factor=size_factor,
+        )
+    else:
+        width, height = image.size
+        min_pixels = get_env_args('min_pixels', int, MIN_PIXELS)
+        max_pixels = get_env_args('max_pixels', int, MAX_PIXELS)
+        resized_height, resized_width = smart_resize(
+            height,
+            width,
+            factor=size_factor,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+        )
+    image = image.resize((resized_width, resized_height))
+    return image
+
+
+class Qwen2VLTemplate(QwenTemplate):
+
+    def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
+                    example: Dict[str, Any]) -> List[Context]:
+        assert media_type in {'image', 'video'}
+        if media_type == 'image':
+            return ['<|vision_start|><|image_pad|><|vision_end|>']
+        else:
+            return ['<|vision_start|><|video_pad|><|vision_end|>']
+
+    def replace_object(self, index: int, example: Dict[str, Any]) -> List[Context]:
+        objects = example.get('objects')
+        if objects:
+            object_ = objects[index]
+            return ['<|object_ref_start|>', object_['caption'], '<|object_ref_end|>']
+        else:
+            return ['<ref-object>']
+
+    def replace_box(self, index: int, example: Dict[str, Any]) -> List[Context]:
+        objects = example.get('objects')
+        if objects:
+            object_ = objects[index]
+            return [
+                f'<|box_start|>({object_["bbox"][0]},{object_["bbox"][1]}),'
+                f'({object_["bbox"][2]},{object_["bbox"][3]})<|box_end|>'
+            ]
+        else:
+            return ['<bbox>']
+
+    def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        inputs, _ = super()._encode(example)
+        if len(inputs) == 0:
+            return inputs, {}
+        processor = self.tokenizer.processor
+        input_ids = inputs['input_ids']
+        labels = inputs['labels']
+        images = example.get('images') or []
+        videos = example.get('videos') or []
+        for media_type in ['images', 'videos']:
+            if locals()[media_type]:
+                if media_type == 'images':
+                    images = load_batch(images, _process_image_qwen)
+                    media_token = 151655
+                    media_inputs = processor.image_processor(images=images, videos=None, return_tensors='pt')
+                    media_grid_thw = media_inputs['image_grid_thw']
+                else:
+                    videos = load_batch(videos, load_video_qwen2)
+                    media_inputs = processor.image_processor(images=None, videos=videos, return_tensors='pt')
+                    media_grid_thw = media_inputs['video_grid_thw']
+                    media_token = 151656
+                idx_list = _findall(input_ids, media_token)
+                added_tokens_len = 0
+                for i, idx in enumerate(idx_list):
+                    merge_length = processor.image_processor.merge_size**2
+                    token_len = (media_grid_thw[i].prod() // merge_length)
+                    input_ids = input_ids[:idx
+                                          + added_tokens_len] + [media_token] * token_len + input_ids[added_tokens_len
+                                                                                                      + idx + 1:]
+                    if labels:
+                        labels = labels[:idx + added_tokens_len] + [-100] * token_len + labels[added_tokens_len + idx
+                                                                                               + 1:]
+                    added_tokens_len += token_len - 1
+                inputs.update(media_inputs)
+
+        inputs['input_ids'] = input_ids
+        inputs['labels'] = labels
+        return inputs, {}
+
+    def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
+        res = super().data_collator(batch, padding_to)
+        for media_type in ['image', 'video']:
+            grid_thw = [b[f'{media_type}_grid_thw'] for b in batch if b.get(f'{media_type}_grid_thw') is not None]
+            if grid_thw:
+                res[f'{media_type}_grid_thw'] = torch.concat(grid_thw)
+        return res
+
+
+register_template(TemplateType.qwen2_vl, Qwen2VLTemplate(), lazy_tokenize=True)
+
 register_template(
     TemplateType.qwen2_audio_generation, Qwen2AudioGenerationTemplate(), lazy_tokenize=True, is_generation=True)
 
@@ -1291,6 +1432,13 @@ register_template(
     TemplateType.yi1_5,
     Template([], ['<|im_start|>user\n{{QUERY}}<|im_end|>\n<|im_start|>assistant\n'], ['<|im_end|>\n'], ['<|im_end|>'],
              None, ['{{SYSTEM}}']))
+
+
+class YiCoderTemplate(ChatmlTemplate):
+    system = 'You are a helpful assistant.'
+
+
+register_template(TemplateType.yi_coder, YiCoderTemplate())
 
 yi_vl_default_system = (
     'This is a chat between an inquisitive human and an AI assistant. Assume the role of the AI assistant. '
@@ -1401,7 +1549,7 @@ register_template(TemplateType.glm4v, GLM4VTemplate(), infer_media_type='dialogu
 
 register_template(
     TemplateType.yi_vl,
-    YiVLTemplate([], ['### Human: {{QUERY}}\n### Assistant:'], ['\n'], ['\n###'], yi_vl_default_system,
+    YiVLTemplate([], [[8308], 'Human: {{QUERY}}\n', [8308], 'Assistant:'], ['\n'], ['\n', [8308]], yi_vl_default_system,
                  ['{{SYSTEM}}\n\n']),
     use_model=True,
     infer_media_type='round',
@@ -1534,6 +1682,26 @@ register_template(
     Template(['<s>'], ['<|User|>:{{QUERY}}\n<|Bot|>:'], ['<eoa>\n'], ['<eoa>'], INTERNLM_SYSTEM,
              ['<s><|System|>:{{SYSTEM}}\n']))
 
+_T = TypeVar('_T')
+
+_log_set = set()  # log once
+
+
+def get_env_args(args_name: str, type_func: Callable[[str], _T], default_value: Optional[_T]) -> Optional[_T]:
+    args_name_upper = args_name.upper()
+    value = os.getenv(args_name_upper)
+    if value is None:
+        value = default_value
+        log_info = (f'Setting {args_name}: {default_value}. '
+                    f'You can adjust this hyperparameter through the environment variable: `{args_name_upper}`.')
+    else:
+        value = type_func(value)
+        log_info = f'Using environment variable `{args_name_upper}`, Setting {args_name}: {value}.'
+    if log_info not in _log_set:
+        _log_set.add(log_info)
+        logger.info(log_info)
+    return value
+
 
 class Internlm2Template(ChatmlTemplate):
     system = INTERNLM_SYSTEM
@@ -1590,12 +1758,14 @@ class InternLMXComposer2Template(Template):
 
         if self.version == 'v2.5':
             hd_num = 24
-            Image_transform = get_class_from_dynamic_module('ixc_utils.Image_transform', self.tokenizer.model_dir)
             if len(images) > 1:
                 hd_num = 6
+            hd_num = get_env_args('hd_num', int, hd_num)
+            Image_transform = get_class_from_dynamic_module('ixc_utils.Image_transform', self.tokenizer.model_dir)
             images = [Image_transform(image, hd_num=hd_num) for image in images]
         elif self.version == 'v2-4khd':
             hd_num = 55
+            hd_num = get_env_args('hd_num', int, hd_num)
             HD_transform = get_class_from_dynamic_module('ixc_utils.HD_transform', self.tokenizer.model_dir)
             images = [HD_transform(image, hd_num=hd_num) for image in images]
         images = [self.model.vis_processor(image).to(dtype) for image in images]
@@ -1612,8 +1782,12 @@ class InternLMXComposer2Template(Template):
             input_ids = input_ids[1:]
             if labels is not None:
                 labels = labels[1:]
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids.tolist()
         input_ids.append(2)  # add dummy </s>
         if labels is not None:
+            if isinstance(labels, torch.Tensor):
+                labels = labels.tolist()
             labels.append(2)
         else:
             labels = []
@@ -1631,7 +1805,7 @@ class InternLMXComposer2Template(Template):
         while i < len(input_ids):
             if input_ids[i] == 2:  # replace_token
                 res_input_ids = torch.tensor([1] + input_ids[pre_i:i], device=device)
-                res_inputs_embeds.append(tok_embeddings(res_input_ids))
+                res_inputs_embeds.append(tok_embeddings(res_input_ids[None])[0])
                 wrap_im_mask += [0] * len(res_input_ids)
                 res_labels += [-100] + labels[pre_i:i]
                 if len(images) > 0 and idx < images.shape[0]:
@@ -1658,8 +1832,8 @@ class InternLMXComposer2Template(Template):
         return res
 
     @staticmethod
-    def get_generate_ids(generate_ids: Tensor, input_token_len: int) -> List[int]:
-        return generate_ids[0].tolist()
+    def _get_generate_ids(generate_ids: List[int], input_token_len: int) -> List[int]:
+        return generate_ids
 
 
 register_template(
@@ -1718,7 +1892,9 @@ class InternvlTemplate(Template):
         images = example.get('images')
         if images:
             labels = inputs.get('labels')
-            pixel_values_images = [transform_image(image) for image in images]
+            input_size = get_env_args('input_size', int, 448)
+            max_num = get_env_args('max_num', int, 12)
+            pixel_values_images = [transform_image(image, input_size, max_num) for image in images]
             pixel_values = torch.cat(pixel_values_images, dim=0).to(self.model.dtype)
             image_bs = pixel_values.shape[0]
 
@@ -1738,7 +1914,7 @@ class InternvlTemplate(Template):
         embedding = self.model.get_input_embeddings()
         device = embedding.weight.device
         input_ids = data['input_ids']
-        inputs_embeds = embedding(input_ids).to(device=device)
+        inputs_embeds = embedding(input_ids[None])[0].to(device=device)
         pixel_values = data['pixel_values']
         if pixel_values is not None:
             pixel_values = pixel_values.to(device=device)
@@ -1752,8 +1928,8 @@ class InternvlTemplate(Template):
         return {'inputs_embeds': inputs_embeds}
 
     @staticmethod
-    def get_generate_ids(generate_ids: Tensor, input_token_len: int) -> List[int]:
-        return generate_ids[0].tolist()
+    def _get_generate_ids(generate_ids: List[int], input_token_len: int) -> List[int]:
+        return generate_ids
 
 
 def _replace_video2image(load_video_func, example, replace_tag) -> List[Context]:
@@ -1779,7 +1955,8 @@ class Internvl2Template(InternvlTemplate):
         if media_type == 'image':
             return image_context
         elif media_type == 'video':
-            load_video = partial(load_video_internvl, num_segments=self.video_segments)
+            video_segments = get_env_args('video_segments', int, self.video_segments)
+            load_video = partial(load_video_internvl, num_segments=video_segments)
             return _replace_video2image(load_video, example, lambda i: [f'Frame{i + 1}: '] + image_context)
 
     def replace_object(self, index: int, example: Dict[str, Any]) -> List[Context]:
@@ -1811,7 +1988,9 @@ class Internvl2Template(InternvlTemplate):
         images = example.get('images')
         if images:
             has_video = bool(example.get('videos'))
-            pixel_values = [transform_image(image, max_num=1 if has_video else 12) for image in images]
+            input_size = get_env_args('input_size', int, 448)
+            max_num = get_env_args('max_num', int, 1 if has_video else 12)
+            pixel_values = [transform_image(image, input_size, max_num) for image in images]
             num_patches = [pv.shape[0] for pv in pixel_values]
             pixel_values = torch.cat(pixel_values).to(self.model.dtype)
         else:
@@ -1936,7 +2115,9 @@ class FlorenceTemplate(Template):
         processor = self.tokenizer.processor
         images = example.get('images') or []
         assert len(images) == 1, 'Florence series models only supports input with a single image.'
-        image_tensors = transform_image(images[0])
+        input_size = get_env_args('input_size', int, 448)
+        max_num = get_env_args('max_num', int, 12)
+        image_tensors = transform_image(images[0], input_size, max_num)
         example['_image'] = image_tensors
 
         # process bbox
@@ -1983,8 +2164,8 @@ class FlorenceTemplate(Template):
         return inputs, {}
 
     @staticmethod
-    def get_generate_ids(generate_ids: Tensor, input_token_len: int) -> List[int]:
-        return generate_ids[0].tolist()
+    def _get_generate_ids(generate_ids: List[int], input_token_len: int) -> List[int]:
+        return generate_ids
 
     def post_process_generate_response(self, response, example):
         if isinstance(example['images'], list):
@@ -2243,8 +2424,8 @@ class LLavaTemplate(Template):
         return res
 
     @staticmethod
-    def get_generate_ids(generate_ids: Tensor, input_token_len: int) -> List[int]:
-        return generate_ids[0].tolist()
+    def _get_generate_ids(generate_ids: List[int], input_token_len: int) -> List[int]:
+        return generate_ids
 
 
 class Llava1_6Template(LlavaHfTemplate):
@@ -2414,12 +2595,19 @@ register_template(
     TemplateType.paligemma, PaliGemmaTemplate(), infer_media_type='dialogue', lazy_tokenize=True, is_generation=True)
 
 
-class Phi3VisionTemplate(Template):
-    image_placeholder = [[32044], '\n']  # <|image|>\n
+class Phi3Template(Template):
 
     def __init__(self):
-        Template.__init__(self, ['<s>'], ['<|user|>\n{{QUERY}}<|end|>\n<|assistant|>\n'], ['<|end|>\n'], ['<|end|>'],
-                          None, ['<s><|system|>\n{{SYSTEM}}<|end|>\n'])
+        super().__init__([], ['<|user|>\n{{QUERY}}<|end|>\n<|assistant|>\n'], ['<|end|>\n'], ['<|end|>'],
+                         None, ['<|system|>\n{{SYSTEM}}<|end|>\n'],
+                         auto_add_bos=True)
+
+
+register_template(TemplateType.phi3, Phi3Template())
+
+
+class Phi3VisionTemplate(Phi3Template):
+    image_placeholder = ['<|image|><s>\n']  # <|image|>\n
 
     def replace_tag(self, media_type, index, example) -> List[Context]:
         if self._is_vllm:
@@ -2445,10 +2633,10 @@ class Phi3VisionTemplate(Template):
             num_img_tokens = inputs.pop('num_img_tokens').tolist()
             idx_list.insert(0, -1)
             for i in range(len(idx_list) - 1):
-                image_token_id = -1
-                res_input_ids += input_ids[idx_list[i] + 1:idx_list[i + 1]] + [image_token_id] * num_img_tokens[i] + [1]
+                image_token_id = -i - 1
+                res_input_ids += input_ids[idx_list[i] + 1:idx_list[i + 1]] + [image_token_id] * num_img_tokens[i]
                 if labels is not None:
-                    res_labels += labels[idx_list[i] + 1:idx_list[i + 1]] + [-100] * (num_img_tokens[i] + 1)
+                    res_labels += labels[idx_list[i] + 1:idx_list[i + 1]] + [-100] * num_img_tokens[i]
             res_input_ids += input_ids[idx_list[-1] + 1:]
             input_ids = res_input_ids
             if labels is not None:
@@ -2542,8 +2730,8 @@ class DeepseekVLTemplate(Template):
         return {'inputs_embeds': inputs_embeds}
 
     @staticmethod
-    def get_generate_ids(generate_ids: Tensor, input_token_len: int) -> List[int]:
-        return generate_ids[0].tolist()
+    def _get_generate_ids(generate_ids: List[int], input_token_len: int) -> List[int]:
+        return generate_ids
 
 
 register_template(TemplateType.deepseek_vl, DeepseekVLTemplate(), use_model=True, lazy_tokenize=True)
@@ -2785,8 +2973,8 @@ class MiniCPMVTemplate(Template):
         return {'inputs_embeds': inputs_embeds[0]}
 
     @staticmethod
-    def get_generate_ids(generate_ids: Tensor, input_token_len: int) -> List[int]:
-        return generate_ids[0].tolist()
+    def _get_generate_ids(generate_ids: List[int], input_token_len: int) -> List[int]:
+        return generate_ids
 
 
 class MiniCPMV2_6Template(QwenTemplateMixin, MiniCPMVTemplate):
@@ -2816,6 +3004,7 @@ class MiniCPMV2_6Template(QwenTemplateMixin, MiniCPMVTemplate):
             use_image_id = False
             max_slice_nums = 1  # or 2
 
+        max_slice_nums = get_env_args('max_slice_nums', int, max_slice_nums)
         input_ids = inputs['input_ids']
         labels = inputs['labels']
         idx_list = _findall(input_ids, -100)
@@ -2980,14 +3169,6 @@ _wizardlm2_system = ('A chat between a curious user and an artificial intelligen
                      'The assistant gives helpful, detailed, and polite answers to the user\'s questions. ')
 register_template(TemplateType.wizardlm2,
                   Template(['{{SYSTEM}}'], ['USER: {{QUERY}} ASSISTANT:'], ['</s>'], ['</s>'], _wizardlm2_system))
-
-_default_phi3_system = ('You are a helpful digital assistant. '
-                        'Please provide safe, ethical and accurate information to the user.')
-
-register_template(
-    TemplateType.phi3,
-    Template(['<s>'], ['<|user|>\n{{QUERY}}<|end|>\n<|assistant|>\n'], ['<|end|>\n'], ['<|end|>'], _default_phi3_system,
-             ['<s><|system|>\n{{SYSTEM}}<|end|>\n']))
 
 register_template(TemplateType.atom,
                   Template(['{{SYSTEM}}'], ['<s>Human: {{QUERY}}\n</s><s>Assistant: '], ['</s>'], ['</s>']))

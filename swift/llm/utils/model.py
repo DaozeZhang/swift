@@ -13,6 +13,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
+from accelerate.utils import find_device
 from modelscope import (AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig,
                         GenerationConfig, GPTQConfig, snapshot_download)
 from modelscope.hub.utils.utils import get_cache_dir
@@ -28,8 +29,8 @@ from transformers.utils.versions import require_version
 from swift import get_logger
 from swift.utils import get_dist_setting, safe_ddp_context, subprocess_run, use_torchacc
 from swift.utils.module_mapping import get_regex_for_mm_default_lora
-from .template import TemplateType
-from .utils import get_max_model_len, get_rope_scaling, is_unsloth_available, set_rope_scaling
+from .template import TemplateType, get_env_args
+from .utils import get_max_model_len, get_rope_scaling, is_unsloth_available, set_rope_scaling, to_device
 
 logger = get_logger()
 
@@ -149,6 +150,14 @@ class ModelType:
     qwen_audio_chat = 'qwen-audio-chat'
     qwen2_audio_7b = 'qwen2-audio-7b'
     qwen2_audio_7b_instruct = 'qwen2-audio-7b-instruct'
+    qwen2_vl_2b_instruct = 'qwen2-vl-2b-instruct'
+    qwen2_vl_2b_instruct_gptq_int4 = 'qwen2-vl-2b-instruct-gptq-int4'
+    qwen2_vl_2b_instruct_gptq_int8 = 'qwen2-vl-2b-instruct-gptq-int8'
+    qwen2_vl_2b_instruct_awq = 'qwen2-vl-2b-instruct-awq'
+    qwen2_vl_7b_instruct = 'qwen2-vl-7b-instruct'
+    qwen2_vl_7b_instruct_gptq_int4 = 'qwen2-vl-7b-instruct-gptq-int4'
+    qwen2_vl_7b_instruct_gptq_int8 = 'qwen2-vl-7b-instruct-gptq-int8'
+    qwen2_vl_7b_instruct_awq = 'qwen2-vl-7b-instruct-awq'
     # chatglm
     chatglm2_6b = 'chatglm2-6b'
     chatglm2_6b_32k = 'chatglm2-6b-32k'
@@ -274,11 +283,16 @@ class ModelType:
     yi_1_5_9b_chat_gptq_int4 = 'yi-1_5-9b-chat-gptq-int4'
     yi_1_5_34b_chat_awq_int4 = 'yi-1_5-34b-chat-awq-int4'
     yi_1_5_34b_chat_gptq_int4 = 'yi-1_5-34b-chat-gptq-int4'
+    # yi-coder
+    yi_coder_1_5b = 'yi-coder-1_5b'
+    yi_coder_1_5b_chat = 'yi-coder-1_5b-chat'
+    yi_coder_9b = 'yi-coder-9b'
+    yi_coder_9b_chat = 'yi-coder-9b-chat'
     # yi-vl
     yi_vl_6b_chat = 'yi-vl-6b-chat'
     yi_vl_34b_chat = 'yi-vl-34b-chat'
     # llava-llama (xtuner)
-    llava_llama3_8b_v1_1 = 'llava-llama-3-8b-v1_1'
+    llava_llama3_8b_v1_1 = 'llava-llama3-8b-v1_1'
     # internlm
     internlm_7b = 'internlm-7b'
     internlm_7b_chat = 'internlm-7b-chat'
@@ -327,6 +341,11 @@ class ModelType:
     internvl2_40b = 'internvl2-40b'
     internvl2_llama3_76b = 'internvl2-llama3-76b'
     internvideo2_chat_8b = 'internvideo2-chat-8b'
+    internvl2_2b_awq = 'internvl2-2b-awq'
+    internvl2_8b_awq = 'internvl2-8b-awq'
+    internvl2_26b_awq = 'internvl2-26b-awq'
+    internvl2_40b_awq = 'internvl2-40b-awq'
+    internvl2_llama3_76b_awq = 'internvl2-llama3-76b-awq'
     # deepseek
     deepseek_7b = 'deepseek-7b'
     deepseek_7b_chat = 'deepseek-7b-chat'
@@ -483,7 +502,11 @@ class ModelType:
     phi3_small_128k_instruct = 'phi3-small-128k-instruct'
     phi3_medium_128k_instruct = 'phi3-medium-128k-instruct'
 
+    phi3_5_mini_instruct = 'phi3_5-mini-instruct'
+    phi3_5_moe_instruct = 'phi3_5-moe-instruct'
+
     phi3_vision_128k_instruct = 'phi3-vision-128k-instruct'
+    phi3_5_vision_instruct = 'phi3_5-vision-instruct'
     # cogagent
     cogvlm_17b_chat = 'cogvlm-17b-chat'
     cogvlm2_19b_chat = 'cogvlm2-19b-chat'  # chinese
@@ -533,22 +556,22 @@ class ModelType:
 
 class LoRATM(NamedTuple):
     # default lora target modules for multi-modals
-    qwen_audio = f'{get_regex_for_mm_default_lora("qwen_audio")}'
-    qwen_vl = f'{get_regex_for_mm_default_lora("qwen_vl")}'
-    qwen2_audio = f'{get_regex_for_mm_default_lora("qwen2_audio")}'
-    glm4v = f'{get_regex_for_mm_default_lora("glm4v")}'
-    llava_next_video = f'{get_regex_for_mm_default_lora("llava_next_video")}'
-    llava_llama = f'{get_regex_for_mm_default_lora("llava_llama")}'
-    llava = f'{get_regex_for_mm_default_lora("llava")}'
+    qwen_audio = 'qwen_audio'
+    qwen_vl = 'qwen_vl'
+    qwen2_audio = 'qwen2_audio'
+    qwen2_vl = 'qwen2_vl'
+    glm4v = 'glm4v'
+    llava_next_video = 'llava_next_video'
+    llava_llama = 'llava_llama'
+    llava = 'llava'
     internlm_xcomposer = ['attention.wqkv', 'attention.wo', 'feed_forward.w1', 'feed_forward.w2', 'feed_forward.w3']
-    internvl = f'{get_regex_for_mm_default_lora("internvl")}'
-    internvideo = f'{get_regex_for_mm_default_lora("internvideo")}'
-    deepseek_vl = f'{get_regex_for_mm_default_lora("deepseek_vl")}'
-    minicpm_v = f'{get_regex_for_mm_default_lora("minicpm_v")}'
-    phi3v = f'{get_regex_for_mm_default_lora("phi3v")}'
-    cogvlm = f'{get_regex_for_mm_default_lora("cogvlm")}'
-    florence = f'{get_regex_for_mm_default_lora("florence")}'
-    idefics3 = f'{get_regex_for_mm_default_lora("idefics3")}'
+    internvl = 'internvl'
+    deepseek_vl = 'deepseek_vl'
+    minicpm_v = 'minicpm_v'
+    phi3v = 'phi3v'
+    cogvlm = 'cogvlm'
+    florence = 'florence'
+    idefics3 = 'idefics3'
     # default lora target modules for nlp llms.
     baichuan = ['W_pack']
     chatglm = ['query_key_value']
@@ -789,6 +812,7 @@ def _check_gptq_model(bits: int, model_config, model_kwargs: Dict[str, Any]) -> 
     'xverse/XVERSE-MoE-A4.2B',
     LoRATM.llama,
     TemplateType.default_generation,
+    tags=['moe'],
     hf_model_id='xverse/XVERSE-MoE-A4.2B')
 @register_model(
     ModelType.baichuan_13b_chat,
@@ -814,7 +838,7 @@ def _check_gptq_model(bits: int, model_config, model_kwargs: Dict[str, Any]) -> 
     LoRATM.llama,
     TemplateType.c4ai,
     requires=['transformers>=4.39.1'],
-    support_vllm=False,
+    support_vllm=True,
     support_flash_attn=True,
     hf_model_id='CohereForAI/c4ai-command-r-v01')
 @register_model(
@@ -823,7 +847,7 @@ def _check_gptq_model(bits: int, model_config, model_kwargs: Dict[str, Any]) -> 
     LoRATM.llama,
     TemplateType.c4ai,
     requires=['transformers>4.39'],
-    support_vllm=False,
+    support_vllm=True,
     support_flash_attn=True,
     hf_model_id='CohereForAI/c4ai-command-r-plus')
 def get_model_tokenizer_from_repo(model_dir: str,
@@ -913,8 +937,6 @@ def get_model_tokenizer_from_repo(model_dir: str,
         model.is_gptq = is_gptq
         model.is_awq = is_awq
         model.is_aqlm = is_aqlm
-        if hasattr(model, 'hf_device_map'):
-            logger.debug(f'Model hf_device_map: {model.hf_device_map}')
     return model, tokenizer
 
 
@@ -974,7 +996,7 @@ def get_model_tokenizer_cogvlm2(*args, **kwargs):
     LoRATM.llava,
     TemplateType.llava_llama_instruct,
     support_flash_attn=True,
-    support_lmdeploy=True,
+    support_vllm=True,
     requires=['transformers>=4.36'],
     tags=['multi-modal', 'vision'],
     hf_model_id='xtuner/llava-llama-3-8b-v1_1-transformers')
@@ -1273,13 +1295,27 @@ def _clone_hook(module, input, output):
     requires=['transformers>=4.36'],
     tags=['multi-modal', 'vision'],
     hf_model_id='microsoft/Phi-3-vision-128k-instruct')
+@register_model(
+    ModelType.phi3_5_vision_instruct,
+    'LLM-Research/Phi-3.5-vision-instruct',
+    LoRATM.phi3v,
+    TemplateType.phi3_vl,
+    support_flash_attn=True,
+    support_vllm=True,
+    requires=['transformers>=4.36'],
+    tags=['multi-modal', 'vision'],
+    function_kwargs={'num_crops': 4},
+    hf_model_id='microsoft/Phi-3.5-vision-instruct')
 def get_model_tokenizer_phi3_vision(model_dir: str,
                                     torch_dtype: Dtype,
                                     model_kwargs: Dict[str, Any],
                                     load_model: bool = True,
                                     **kwargs):
+    processor_kwargs = {}
+    if 'num_crops' in kwargs:
+        processor_kwargs['num_crops'] = get_env_args('num_crops', int, kwargs['num_crops'])
     from transformers import AutoProcessor
-    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True, **processor_kwargs)
     model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
     tokenizer.processor = processor
 
@@ -1681,7 +1717,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     TemplateType.default_generation,
     support_flash_attn=True,
     support_vllm=True,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     requires=['transformers>=4.40'],
     hf_model_id='Qwen/Qwen2-57B-A14B')
 @register_model(
@@ -1770,7 +1806,6 @@ def get_model_tokenizer_glm4v(model_dir: str,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
     support_vllm=True,
-    tags=['general'],
     hf_model_id='microsoft/Phi-3-mini-128k-instruct')
 @register_model(
     ModelType.phi3_medium_4k_instruct,
@@ -1780,7 +1815,6 @@ def get_model_tokenizer_glm4v(model_dir: str,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
     support_vllm=True,
-    tags=['general'],
     hf_model_id='microsoft/Phi-3-medium-4k-instruct')
 @register_model(
     ModelType.phi3_medium_128k_instruct,
@@ -1790,7 +1824,6 @@ def get_model_tokenizer_glm4v(model_dir: str,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
     support_vllm=True,
-    tags=['general'],
     hf_model_id='microsoft/Phi-3-medium-128k-instruct')
 @register_model(
     ModelType.phi3_4b_4k_instruct,
@@ -1799,9 +1832,27 @@ def get_model_tokenizer_glm4v(model_dir: str,
     TemplateType.phi3,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
-    support_vllm=False,
-    tags=['general'],
+    support_vllm=True,
     hf_model_id='microsoft/Phi-3-mini-4k-instruct')
+@register_model(
+    ModelType.phi3_5_moe_instruct,
+    'LLM-Research/Phi-3.5-MoE-instruct',
+    LoRATM.llama,
+    TemplateType.phi3,
+    requires=['transformers>=4.36'],
+    support_flash_attn=True,
+    support_vllm=False,
+    tags=['moe'],
+    hf_model_id='microsoft/Phi-3.5-MoE-instruct')
+@register_model(
+    ModelType.phi3_5_mini_instruct,
+    'LLM-Research/Phi-3.5-mini-instruct',
+    LoRATM.phi3,
+    TemplateType.phi3,
+    requires=['transformers>=4.36'],
+    support_flash_attn=True,
+    support_vllm=True,
+    hf_model_id='microsoft/Phi-3.5-mini-instruct')
 @register_model(
     ModelType.wizardlm2_8x22b,
     'AI-ModelScope/WizardLM-2-8x22B',
@@ -2006,6 +2057,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     TemplateType.default_generation,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     requires=['transformers>=4.40'],
     hf_model_id='Qwen/Qwen1.5-MoE-A2.7B')
 @register_model(
@@ -2145,6 +2197,42 @@ def get_model_tokenizer_glm4v(model_dir: str,
     support_vllm=True,
     support_lmdeploy=True,
     hf_model_id='HuggingFaceH4/zephyr-7b-beta')
+@register_model(
+    ModelType.yi_coder_1_5b,
+    '01ai/Yi-Coder-1.5B',
+    LoRATM.llama,
+    TemplateType.default_generation,
+    support_flash_attn=True,
+    support_vllm=True,
+    support_lmdeploy=True,
+    hf_model_id='01-ai/Yi-Coder-1.5B')
+@register_model(
+    ModelType.yi_coder_9b,
+    '01ai/Yi-Coder-9B',
+    LoRATM.llama,
+    TemplateType.default_generation,
+    support_flash_attn=True,
+    support_vllm=True,
+    support_lmdeploy=True,
+    hf_model_id='01-ai/Yi-Coder-9B')
+@register_model(
+    ModelType.yi_coder_1_5b_chat,
+    '01ai/Yi-Coder-1.5B-Chat',
+    LoRATM.llama,
+    TemplateType.yi_coder,
+    support_flash_attn=True,
+    support_vllm=True,
+    support_lmdeploy=True,
+    hf_model_id='01-ai/Yi-Coder-1.5B-Chat')
+@register_model(
+    ModelType.yi_coder_9b_chat,
+    '01ai/Yi-Coder-9B-Chat',
+    LoRATM.llama,
+    TemplateType.yi_coder,
+    support_flash_attn=True,
+    support_vllm=True,
+    support_lmdeploy=True,
+    hf_model_id='01-ai/Yi-Coder-9B-Chat')
 @register_model(
     ModelType.yi_6b_chat,
     '01ai/Yi-6B-Chat',
@@ -2295,7 +2383,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
     support_vllm=True,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     hf_model_id='OpenBuddy/openbuddy-mixtral-7bx8-v18.1-32k')
 @register_model(
     ModelType.openbuddy_mistral_7b_chat,
@@ -2422,7 +2510,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ignore_file_pattern=[r'.+\.pt$'],
     support_flash_attn=True,
     support_vllm=True,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     hf_model_id='mistralai/Mixtral-8x7B-v0.1')
 @register_model(
     ModelType.mixtral_moe_7b_instruct,
@@ -2433,7 +2521,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ignore_file_pattern=[r'.+\.pt$'],
     support_flash_attn=True,
     support_vllm=True,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     hf_model_id='mistralai/Mixtral-8x7B-Instruct-v0.1')
 @register_model(
     ModelType.mixtral_moe_8x22b_v1,
@@ -2443,6 +2531,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     hf_model_id='mistral-community/Mixtral-8x22B-v0.1')
 @register_model(
     ModelType.mistral_large_instruct_2407,
@@ -2481,7 +2570,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
     support_vllm=True,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     hf_model_id='databricks/dbrx-base')
 @register_model(
     ModelType.dbrx_instruct,
@@ -2491,7 +2580,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     requires=['transformers>=4.36'],
     support_flash_attn=True,
     support_vllm=True,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     hf_model_id='databricks/dbrx-instruct')
 def get_model_tokenizer_with_flash_attn(model_dir: str,
                                         torch_dtype: Dtype,
@@ -2849,7 +2938,6 @@ def get_model_tokenizer_florence(model_dir: str,
     support_flash_attn=True,
     support_gradient_checkpointing=False,
     support_vllm=True,
-    tags=['general'],
     hf_model_id='microsoft/Phi-3-small-8k-instruct')
 @register_model(
     ModelType.phi3_small_128k_instruct,
@@ -2860,7 +2948,6 @@ def get_model_tokenizer_florence(model_dir: str,
     support_flash_attn=True,
     support_gradient_checkpointing=False,
     support_vllm=True,
-    tags=['general'],
     hf_model_id='microsoft/Phi-3-small-128k-instruct')
 def get_model_tokenizer_phi3_small(model_dir: str,
                                    torch_dtype: Dtype,
@@ -2967,9 +3054,9 @@ def get_model_tokenizer_phi3_small(model_dir: str,
     TemplateType.qwen,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     requires=['auto_gptq>=0.5', 'transformers>=4.40'],
     torch_dtype=torch.float16,
-    support_gradient_checkpointing=False,
     function_kwargs={'gptq_bits': 4},
     hf_model_id='Qwen/Qwen2-57B-A14B-Instruct-GPTQ-Int4')
 @register_model(
@@ -2979,7 +3066,7 @@ def get_model_tokenizer_phi3_small(model_dir: str,
     TemplateType.qwen,
     support_flash_attn=True,
     support_vllm=True,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     requires=['transformers>=4.40'],
     hf_model_id='Qwen/Qwen2-57B-A14B-Instruct')
 @register_model(
@@ -3364,6 +3451,7 @@ def get_model_tokenizer_phi3_small(model_dir: str,
     support_flash_attn=True,
     support_vllm=True,
     requires=['transformers>=4.40'],
+    tags=['moe'],
     hf_model_id='Qwen/Qwen1.5-MoE-A2.7B-Chat')
 @register_model(
     ModelType.codeqwen1half_7b_chat,
@@ -3413,6 +3501,131 @@ def get_model_tokenizer_qwen2_audio(model_dir: str,
     kwargs['automodel_class'] = Qwen2AudioForConditionalGeneration
     model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
     tokenizer.processor = processor
+    return model, tokenizer
+
+
+@register_model(
+    ModelType.qwen2_vl_7b_instruct,
+    'qwen/Qwen2-VL-7B-Instruct',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    # pip install qwen_vl_utils
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils'],  # 'pyav'
+    tags=['multi-modal', 'vision'],
+    hf_model_id='Qwen/Qwen2-VL-7B-Instruct')
+@register_model(
+    ModelType.qwen2_vl_7b_instruct_gptq_int4,
+    'qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils', 'auto_gptq>=0.5'],
+    tags=['multi-modal', 'vision'],
+    function_kwargs={'gptq_bits': 4},
+    torch_dtype=torch.float16,
+    hf_model_id='Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4')
+@register_model(
+    ModelType.qwen2_vl_7b_instruct_gptq_int8,
+    'qwen/Qwen2-VL-7B-Instruct-GPTQ-Int8',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils', 'auto_gptq>=0.5'],
+    tags=['multi-modal', 'vision'],
+    function_kwargs={'gptq_bits': 8},
+    torch_dtype=torch.float16,
+    hf_model_id='Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int8')
+@register_model(
+    ModelType.qwen2_vl_7b_instruct_awq,
+    'qwen/Qwen2-VL-7B-Instruct-AWQ',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils', 'autoawq'],
+    tags=['multi-modal', 'vision'],
+    function_kwargs={'is_awq': True},
+    torch_dtype=torch.float16,
+    hf_model_id='Qwen/Qwen2-VL-7B-Instruct-AWQ')
+@register_model(
+    ModelType.qwen2_vl_2b_instruct,
+    'qwen/Qwen2-VL-2B-Instruct',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils'],  # 'pyav'
+    tags=['multi-modal', 'vision'],
+    hf_model_id='Qwen/Qwen2-VL-2B-Instruct')
+@register_model(
+    ModelType.qwen2_vl_2b_instruct_gptq_int4,
+    'qwen/Qwen2-VL-2B-Instruct-GPTQ-Int4',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils', 'auto_gptq>=0.5'],
+    tags=['multi-modal', 'vision'],
+    function_kwargs={'gptq_bits': 4},
+    torch_dtype=torch.float16,
+    hf_model_id='Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int4')
+@register_model(
+    ModelType.qwen2_vl_2b_instruct_gptq_int8,
+    'qwen/Qwen2-VL-2B-Instruct-GPTQ-Int8',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils', 'auto_gptq>=0.5'],
+    tags=['multi-modal', 'vision'],
+    function_kwargs={'gptq_bits': 8},
+    torch_dtype=torch.float16,
+    hf_model_id='Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int8')
+@register_model(
+    ModelType.qwen2_vl_2b_instruct_awq,
+    'qwen/Qwen2-VL-2B-Instruct-AWQ',
+    LoRATM.qwen2_vl,
+    TemplateType.qwen2_vl,
+    support_flash_attn=True,
+    placeholder_tokens=['<|image_pad|>', '<|video_pad|>'],
+    requires=['transformers>=4.45.0.dev0', 'qwen_vl_utils', 'autoawq'],
+    tags=['multi-modal', 'vision'],
+    function_kwargs={'is_awq': True},
+    torch_dtype=torch.float16,
+    hf_model_id='Qwen/Qwen2-VL-2B-Instruct-AWQ')
+def get_model_tokenizer_qwen2_vl(model_dir: str,
+                                 torch_dtype: Dtype,
+                                 model_kwargs: Dict[str, Any],
+                                 load_model: bool = True,
+                                 **kwargs):
+    try:
+        from torchvision.io import video
+        if not hasattr(video, '_patching'):
+            # not read audio
+            video._patching = True
+            _old_read_from_stream = video._read_from_stream
+
+            def _read_from_stream(container: 'av.container.Container', start_offset: float, end_offset: float,
+                                  pts_unit: str, stream: 'av.stream.Stream', *args, **kwargs) -> List['av.frame.Frame']:
+                if stream.type == 'video':
+                    return _old_read_from_stream(container, start_offset, end_offset, pts_unit, stream, *args, **kwargs)
+                return []
+
+            video._read_from_stream = _read_from_stream
+    except Exception:
+        pass
+
+    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    processor = AutoProcessor.from_pretrained(model_dir)
+    kwargs['automodel_class'] = Qwen2VLForConditionalGeneration
+    model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
+    tokenizer.processor = processor
+    if model is not None:
+        model.model.embed_tokens.register_forward_hook(_clone_hook)
     return model, tokenizer
 
 
@@ -3579,6 +3792,7 @@ def get_model_tokenizer_qwen2_audio(model_dir: str,
     torch_dtype=torch.float16,
     function_kwargs={'gptq_bits': 4},
     support_flash_attn=True,
+    tags=['moe'],
     hf_model_id='Qwen/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4')
 def get_model_tokenizer_qwen2_intx(model_dir: str,
                                    torch_dtype: Dtype,
@@ -3853,10 +4067,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-Coder-V2-Base',
     LoRATM.deepseek2,
     TemplateType.default_generation,
-    support_gradient_checkpointing=False,
     support_flash_attn=True,
     support_vllm=True,
-    tags=['coding'],
+    tags=['coding', 'moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-Coder-V2-Base')
 @register_model(
@@ -3864,10 +4077,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-Coder-V2-Lite-Base',
     LoRATM.deepseek2,
     TemplateType.default_generation,
-    support_gradient_checkpointing=False,
+    tags=['coding', 'moe'],
     support_flash_attn=True,
     support_vllm=True,
-    tags=['coding'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-Coder-V2-Lite-Base')
 @register_model(
@@ -3875,10 +4087,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-Coder-V2-Instruct',
     LoRATM.deepseek2,
     TemplateType.deepseek2,
-    support_gradient_checkpointing=False,
     support_flash_attn=True,
     support_vllm=True,
-    tags=['coding'],
+    tags=['coding', 'moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-Coder-V2-Instruct')
 @register_model(
@@ -3886,10 +4097,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct',
     LoRATM.deepseek2,
     TemplateType.deepseek2,
-    support_gradient_checkpointing=False,
     support_flash_attn=True,
     support_vllm=True,
-    tags=['coding'],
+    tags=['coding', 'moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct')
 @register_model(
@@ -3897,9 +4107,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-V2-Lite',
     LoRATM.deepseek2,
     TemplateType.default_generation,
-    support_gradient_checkpointing=False,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-V2-Lite')
 @register_model(
@@ -3907,9 +4117,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-V2-Lite-Chat',
     LoRATM.deepseek2,
     TemplateType.deepseek2,
-    support_gradient_checkpointing=False,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-V2-Lite-Chat')
 @register_model(
@@ -3917,9 +4127,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-V2',
     LoRATM.deepseek2,
     TemplateType.default_generation,
-    support_gradient_checkpointing=False,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-V2')
 @register_model(
@@ -3927,9 +4137,9 @@ def get_model_tokenizer_internlm2(model_dir: str,
     'deepseek-ai/DeepSeek-V2-Chat',
     LoRATM.deepseek2,
     TemplateType.deepseek2,
-    support_gradient_checkpointing=False,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-V2-Chat')
 def get_model_tokenizer_deepseek2(model_dir: str,
@@ -4102,6 +4312,81 @@ def get_model_tokenizer_deepseek2(model_dir: str,
     placeholder_tokens=['<IMG_CONTEXT>'],
     tags=['multi-modal', 'vision', 'video'],
     hf_model_id='OpenGVLab/InternVL2-Llama3-76B')
+@register_model(
+    ModelType.internvl2_2b_awq,
+    'OpenGVLab/InternVL2-2B-AWQ',
+    LoRATM.internvl,
+    TemplateType.internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=True,
+    support_lmdeploy=True,
+    support_vllm=False,
+    torch_dtype=torch.float16,
+    function_kwargs={'is_awq': True},
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2-2B-AWQ')
+@register_model(
+    ModelType.internvl2_8b_awq,
+    'OpenGVLab/InternVL2-8B-AWQ',
+    LoRATM.internvl,
+    TemplateType.internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=True,
+    support_lmdeploy=True,
+    support_vllm=False,
+    torch_dtype=torch.float16,
+    function_kwargs={'is_awq': True},
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2-8B-AWQ')
+@register_model(
+    ModelType.internvl2_26b_awq,
+    'OpenGVLab/InternVL2-26B-AWQ',
+    LoRATM.internvl,
+    TemplateType.internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=True,
+    support_lmdeploy=True,
+    support_vllm=False,
+    torch_dtype=torch.float16,
+    function_kwargs={'is_awq': True},
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2-26B-AWQ')
+@register_model(
+    ModelType.internvl2_40b_awq,
+    'OpenGVLab/InternVL2-40B-AWQ',
+    LoRATM.internvl,
+    TemplateType.internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=True,
+    support_lmdeploy=True,
+    support_vllm=False,
+    torch_dtype=torch.float16,
+    function_kwargs={'is_awq': True},
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2-40B-AWQ')
+@register_model(
+    ModelType.internvl2_llama3_76b_awq,
+    'OpenGVLab/InternVL2-Llama3-76B-AWQ',
+    LoRATM.internvl,
+    TemplateType.internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=True,
+    support_lmdeploy=True,
+    support_vllm=False,
+    torch_dtype=torch.float16,
+    function_kwargs={'is_awq': True},
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2-Llama3-76B-AWQ')
 def get_model_tokenizer_internvl(model_dir: str,
                                  torch_dtype: Dtype,
                                  model_kwargs: Dict[str, Any],
@@ -4109,7 +4394,10 @@ def get_model_tokenizer_internvl(model_dir: str,
                                  **kwargs):
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True, use_fast=False)
     if kwargs.get('eos_token') is None and tokenizer.eos_token != '<|im_end|>':
-        del tokenizer.__class__.eos_token_id
+        try:
+            del tokenizer.__class__.eos_token_id
+        except AttributeError:
+            pass
         tokenizer.eos_token = '<|im_end|>'
 
     model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
@@ -4218,7 +4506,7 @@ def get_model_tokenizer_internvideo(model_dir: str,
     eos_token='<|im_end|>',
     support_flash_attn=True,
     support_lmdeploy=True,
-    requires=['decord'],
+    # requires=['decord'],
     tags=['multi-modal', 'vision'],
     function_kwargs={'version': 'v2.5'},
     hf_model_id='internlm/internlm-xcomposer2d5-7b')
@@ -4319,22 +4607,32 @@ def git_clone_github(github_url: str,
 
 
 def _use_submodel_func(model, submodel_name: str, func_list: List[str]) -> None:
+    if hasattr(model, '_is_patching'):
+        return
+    model._is_patching = True
     submodel = getattr(model, submodel_name)
 
     def _get_new_func(func_name: str):
-        _old_func = getattr(submodel, func_name)
+        _old_func = getattr(submodel.__class__, func_name)
 
         @wraps(_old_func)
-        def _new_func(*args, **kwargs):
-            return _old_func(*args, **kwargs)
+        def _new_func(self, *args, **kwargs):
+            res = _old_func(submodel, *args, **kwargs)
+            if func_name == 'forward':
+                device = find_device(args)
+                if device is None:
+                    device = find_device(kwargs)
+                res = res.__class__(**to_device(res, device))
+            return res
 
         return _new_func
 
     for key in func_list:
-        model_key = key
-        if key == 'forward' and hasattr(model, '_old_forward'):  # device_map
-            model_key = '_old_forward'
-        setattr(model, model_key, _get_new_func(key))
+        setattr(model, key, MethodType(_get_new_func(key), model))
+        if key == 'generate' and model.device != submodel.device:
+            submodel.__class__.device = model.device
+        if key == 'forward' and 'generate' in func_list:
+            setattr(submodel, key, MethodType(_get_new_func(key), submodel))  # fix device_map
 
 
 @register_model(
@@ -4728,7 +5026,7 @@ def get_model_tokenizer_deepseek_vl(model_dir: str,
     requires=['transformers>=4.38', 'aqlm', 'torch>=2.2.0'],
     support_flash_attn=True,
     support_vllm=False,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     function_kwargs={'is_aqlm': True},
     hf_model_id='ISTA-DASLab/Mixtral-8x7b-AQLM-2Bit-1x16-hf')
 @register_model(
@@ -5522,6 +5820,7 @@ def get_model_tokenizer_telechat(model_dir: str,
     TemplateType.deepseek,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     hf_model_id='deepseek-ai/deepseek-moe-16b-chat')
 @register_model(
     ModelType.deepseek_moe_16b,
@@ -5530,6 +5829,7 @@ def get_model_tokenizer_telechat(model_dir: str,
     TemplateType.default_generation,
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     hf_model_id='deepseek-ai/deepseek-moe-16b-base')
 @register_model(
     ModelType.minicpm_moe_8x2b,
@@ -5539,6 +5839,7 @@ def get_model_tokenizer_telechat(model_dir: str,
     requires=['transformers>=4.36.0'],
     support_flash_attn=True,
     support_vllm=True,
+    tags=['moe'],
     hf_model_id='openbmb/MiniCPM-MoE-8x2B')
 def get_model_tokenizer_deepseek_moe(model_dir: str,
                                      torch_dtype: Dtype,
@@ -5600,7 +5901,7 @@ def get_model_tokenizer_deepseek_moe(model_dir: str,
     'YuanLLM/Yuan2-M32-hf',
     LoRATM.llama,
     TemplateType.yuan,
-    support_gradient_checkpointing=False,
+    tags=['moe'],
     support_flash_attn=True,
     hf_model_id='IEITYuan/Yuan2-M32-hf')
 def get_model_tokenizer_yuan(model_dir: str,
@@ -5788,7 +6089,7 @@ def ignore_check_imports():
     TemplateType.minicpm_v_v2_6,
     support_flash_attn=True,
     support_vllm=True,
-    requires=['timm', 'transformers>=4.36', 'decord'],
+    requires=['timm', 'transformers>=4.36'],  # 'decord'
     placeholder_tokens=['<unk>'],
     function_kwargs={'version': 'v2.6'},
     tags=['multi-modal', 'vision', 'video'],
@@ -5857,7 +6158,6 @@ def get_model_tokenizer_llava_hf(model_dir: str, *args, **kwargs):
     eos_token='</s>',
     support_flash_attn=True,
     support_vllm=True,
-    support_lmdeploy=True,
     requires=['transformers>=4.36'],
     tags=['multi-modal', 'vision'],
     hf_model_id='llava-hf/llava-1.5-13b-hf')
@@ -5869,7 +6169,6 @@ def get_model_tokenizer_llava_hf(model_dir: str, *args, **kwargs):
     eos_token='</s>',
     support_flash_attn=True,
     support_vllm=True,
-    support_lmdeploy=True,
     requires=['transformers>=4.36'],
     tags=['multi-modal', 'vision'],
     hf_model_id='llava-hf/llava-1.5-7b-hf')
@@ -6072,7 +6371,6 @@ def get_model_tokenizer_llava_next_video_yi(*args, **kwargs):
     LoRATM.llava_llama,
     TemplateType.llama3_llava_next,
     support_flash_attn=True,
-    support_lmdeploy=True,
     tags=['multi-modal', 'vision'],
     function_kwargs={'llm_model_type': 'next_llama'},
     hf_model_id='lmms-lab/llama3-llava-next-8b')
@@ -6082,7 +6380,6 @@ def get_model_tokenizer_llava_next_video_yi(*args, **kwargs):
     LoRATM.llava,
     TemplateType.llava_qwen,
     support_flash_attn=True,
-    support_lmdeploy=True,
     tags=['multi-modal', 'vision'],
     function_kwargs={'llm_model_type': 'next_qwen'},
     hf_model_id='lmms-lab/llava-next-72b')
@@ -6092,7 +6389,6 @@ def get_model_tokenizer_llava_next_video_yi(*args, **kwargs):
     LoRATM.llava,
     TemplateType.llava_qwen,
     support_flash_attn=True,
-    support_lmdeploy=True,
     tags=['multi-modal', 'vision'],
     function_kwargs={'llm_model_type': 'next_qwen'},
     hf_model_id='lmms-lab/llava-next-110b')
@@ -6238,7 +6534,7 @@ def fix_transformers_upgrade(module: PreTrainedModel) -> None:
             module._set_gradient_checkpointing = MethodType(PreTrainedModel._set_gradient_checkpointing, module)
 
 
-def fix_gradient_checkpointing_warning() -> None:
+def fix_gradient_checkpointing_warning(is_moe: bool = False) -> None:
     torch_version = version.parse(torch.__version__)
     if torch_version < version.parse('2'):
         return
@@ -6246,7 +6542,7 @@ def fix_gradient_checkpointing_warning() -> None:
         # fix https://github.com/Dao-AILab/flash-attention/issues/341
         _use_reentrant = True
     else:
-        _use_reentrant = False
+        _use_reentrant = is_moe
     _old_checkpoint = torch.utils.checkpoint.checkpoint
     if not hasattr(torch.utils.checkpoint, '_old_checkpoint'):  # avoid double patching
 
@@ -6394,7 +6690,9 @@ def get_model_tokenizer(model_type: str,
         model.model_dir = model_dir
         model.is_multimodal = is_multimodal
         fix_transformers_upgrade(model)
-    fix_gradient_checkpointing_warning()
+
+    is_moe = '-moe' in model_type or 'moe' in model_info.get('tags', [])
+    fix_gradient_checkpointing_warning(is_moe)
     tokenizer.model_type = model_type
     tokenizer.model_dir = model_dir
     tokenizer.is_multimodal = is_multimodal
@@ -6432,5 +6730,8 @@ def get_default_template_type(model_type: str) -> Optional[str]:
     return MODEL_MAPPING[model_type].get('template')
 
 
-def get_default_lora_target_modules(model_type: str) -> Optional[List[str]]:
-    return MODEL_MAPPING[model_type].get('lora_target_modules')
+def get_default_lora_target_modules(model_type: str) -> Union[List[str], str, None]:
+    res = MODEL_MAPPING[model_type].get('lora_target_modules')
+    if isinstance(res, str):
+        res = get_regex_for_mm_default_lora(res)
+    return res

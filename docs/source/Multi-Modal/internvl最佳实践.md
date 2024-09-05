@@ -31,7 +31,7 @@
 
 transformers的auto device map算法对多模态模型支持不友好, 这可能导致不同 GPU 卡之间的显存分配不均匀。
 - 可以通过参数`--device_max_memory`设置每张卡的显存使用, 比如四卡环境, 可以设置`--device_max_memory 15GB 15GB 15GB 15GB`
-- 或者通过`--device_map_config_path`显式指定device map
+- 或者通过`--device_map_config`显式指定device map
 
 3. **InternVL2模型与前系列(InternVL-V1.5和Mini-InternVL)模型的区别**
 
@@ -338,7 +338,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 swift sft \
 ```
 
 ## 自定义数据集
-[自定义数据集](../LLM/自定义与拓展.md#-推荐命令行参数的形式)支持json, jsonl样式, 以下是自定义数据集的例子:
+[自定义数据集](../Instruction/自定义与拓展.md#-推荐命令行参数的形式)支持json, jsonl样式, 以下是自定义数据集的例子:
 
 (支持多轮对话, 图片支持传入本地路径或URL, 多张图片用逗号','分割)
 
