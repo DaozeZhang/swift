@@ -163,7 +163,7 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
 
     if args.device_max_memory:
         n_gpu = torch.cuda.device_count()
-        assert len(args.device_max_memory) == n_gpu // args.local_world_size
+        assert len(args.device_max_memory) == n_gpu // args.local_world_size, f'{len(args.device_max_memory)} != {n_gpu} // {args.local_world_size}'
         model_kwargs['max_memory'] = {
             i: mem
             for i, mem in zip(range(max(args.local_rank, 0), n_gpu, args.local_world_size), args.device_max_memory)

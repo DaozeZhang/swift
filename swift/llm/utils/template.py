@@ -70,6 +70,7 @@ class TemplateType:
     # lmms-lab:llava
     llama3_llava_next = 'llama3-llava-next'
     llava_qwen = 'llava-qwen'
+    llava_next_llama3 = 'llava-next-llama3'
     # xtuner:llava
     llava_llama_instruct = 'llava-llama-instruct'
 
