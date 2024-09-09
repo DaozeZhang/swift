@@ -6213,12 +6213,6 @@ def get_model_tokenizer_llava_onevision(*args, **kwargs):
     support_flash_attn=True,
     support_vllm=True,
     support_lmdeploy=True,
-    vllm_config={
-        'image_input_type': 'pixel_values',
-        'image_token_id': 32000,
-        'image_input_shape': '1,3,672,672',
-        'image_feature_size': 2928,
-    },
     requires=['transformers>=4.41'],
     tags=['multi-modal', 'vision'])
 def get_model_tokenizer_llava_next(*args, **kwargs):
