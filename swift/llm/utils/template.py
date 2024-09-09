@@ -89,7 +89,6 @@ class TemplateType:
     internvl2 = 'internvl2'
     internvl_phi3 = 'internvl-phi3'
     internvl2_phi3 = 'internvl2-phi3'
-    internvideo2 = 'internvideo2' 
     florence = 'florence'
     yi = 'yi'
     yi1_5 = 'yi1_5'
@@ -2041,23 +2040,6 @@ register_template(
 register_template(TemplateType.internvl2, Internvl2Template(), use_model=True, lazy_tokenize=True)
 
 register_template(TemplateType.internvl2_phi3, Internvl2Phi3Template(), use_model=True, lazy_tokenize=True)
-
-
-class InternVideo2Template(Internvl2Template):
-    video_segments = 8
-    system = '你是由上海人工智能实验室联合商汤科技开发的多模态大模型, 英文名叫InternVideo, 是一个有用无害的人工智能助手。'
-
-    # def __init__(self):
-    #     Template.__init__(
-    #         self, [], ['<|im_start|>user\n{{QUERY}}<|im_end|><|im_start|>assistant\n'], ['<|im_end|>'], ['<|im_end|>'],
-    #         self.system, ['<|im_start|>system\n{{SYSTEM}}<|im_end|>'],
-    #         auto_add_bos=True)
-    def __init__(self):
-        Template.__init__(self, ['<s>[INST] '], ['{{QUERY}} [/INST]'], ['</s>'], ['</s>'],
-                         system_prefix=['<<SYS>>\n{{system}}\n<</SYS>>\n\n'])
-
-
-register_template(TemplateType.internvideo2, InternVideo2Template(), use_model=True, lazy_tokenize=True)
 
 
 class FlorenceTemplate(Template):

@@ -340,7 +340,6 @@ class ModelType:
     internvl2_26b = 'internvl2-26b'
     internvl2_40b = 'internvl2-40b'
     internvl2_llama3_76b = 'internvl2-llama3-76b'
-    internvideo2_chat_8b = 'internvideo2-chat-8b'
     internvl2_2b_awq = 'internvl2-2b-awq'
     internvl2_8b_awq = 'internvl2-8b-awq'
     internvl2_26b_awq = 'internvl2-26b-awq'
@@ -4425,75 +4424,6 @@ def get_model_tokenizer_internvl(model_dir: str,
         _use_submodel_func(model, 'language_model', func_list)
         embedding = model.language_model.get_input_embeddings()
         embedding.register_forward_hook(_clone_hook)
-
-    return model, tokenizer
-
-
-@register_model(
-    ModelType.internvideo2_chat_8b,
-    'OpenGVLab/InternVideo2-Chat-8B',
-    LoRATM.internvideo,
-    TemplateType.internvideo2,
-    requires=['transformers>=4.35', 'timm'],
-    ignore_file_pattern=[r'.+\.zip$'],
-    support_flash_attn=True,
-    support_lmdeploy=True,
-    support_vllm=True,
-    placeholder_tokens=['<IMG_CONTEXT>'],
-    tags=['multi-modal', 'vision'],
-    hf_model_id='OpenGVLab/InternVideo2-Chat-8B')
-def get_model_tokenizer_internvideo(model_dir: str,
-                                    torch_dtype: Dtype,
-                                    model_kwargs: Dict[str, Any],
-                                    load_model: bool = True,
-                                    **kwargs):
-    model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-    use_flash_attn = kwargs.pop('use_flash_attn', False)
-    model_config.model_config.use_flash_attention = use_flash_attn 
-    model_quant_config = getattr(model_config, 'quantization_config', None)
-
-    use_bnb = False
-    if model_quant_config is not None:
-        use_bnb = model_quant_config.get('quant_method', None) == 'bitsandbytes'
-    quantization_config = model_kwargs.get('quantization_config', None)
-    if isinstance(quantization_config, BitsAndBytesConfig):
-        use_bnb = True
-
-    model_config.model_config.llm.pretrained_llm_path = snapshot_download('LLM-Research/Mistral-7B-Instruct-v0.3')
-    
-    # replace the from_pretrained of BertTokenizer, BertConfig
-    # to let the Bert (inside the InternVideo2_VideoChat2) load from Ms but not HF 
-    bert_model_dir = snapshot_download('AI-ModelScope/bert-base-uncased')
-
-    from transformers import BertTokenizer, BertConfig
-    _bert_tokenizer_old_from_pretrained = BertTokenizer.from_pretrained 
-    @wraps(_bert_tokenizer_old_from_pretrained)
-    def new_from_pretrained(model_id, *args, **kwargs):
-        if model_id == 'bert-base-uncased':
-            model_id = bert_model_dir
-        return _bert_tokenizer_old_from_pretrained(model_id, *args, **kwargs)
-    BertTokenizer.from_pretrained = new_from_pretrained
-
-    _bert_config_old_from_pretrained = BertConfig.from_pretrained
-    @wraps(_bert_config_old_from_pretrained)
-    def new_from_pretrained(model_id, *args, **kwargs):
-        if model_id == 'bert-base-uncased':
-            model_id = bert_model_dir
-        return _bert_config_old_from_pretrained(model_id, *args, **kwargs)
-    BertConfig.from_pretrained = new_from_pretrained
-
-    # here we don't replace the _no_split_modules of the original model class
-    # because #modules inside is not one or two
-    # model_cls = get_class_from_dynamic_module('modeling_videochat2.InternVideo2_VideoChat2', model_dir)
-    # model_cls._no_split_modules = []
-    # bert_model_cls = get_class_from_dynamic_module('modeling_qformer.BertLMHeadModel', model_dir)
-    # bert_model_cls._no_split_modules = []
-    model_kwargs['device_map'] = torch.cuda.current_device()
-
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True, use_fast=False)
-    model, tokenizer = get_model_tokenizer_from_repo(
-        model_dir, torch_dtype, model_kwargs, load_model, tokenizer=tokenizer, model_config=model_config, 
-        automodel_class=AutoModel, **kwargs)
 
     return model, tokenizer
 
