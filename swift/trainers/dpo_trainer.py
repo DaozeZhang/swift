@@ -36,6 +36,7 @@ class DPOTrainer(PushToMsHubMixin, SwiftMixin, HFDPOTrainer):
         self.is_encoder_decoder = model.config.is_encoder_decoder
         self.is_peft_model = is_peft_available() and isinstance(model, PeftModel)
         self.tokenizer = kwargs['tokenizer']
+        self.lazy_tokenize = kwargs.pop('lazy_tokenize', False)
         self.sft_beta = sft_beta
         self.beta = args.beta
         self.loss_type = args.loss_type
@@ -76,7 +77,7 @@ class DPOTrainer(PushToMsHubMixin, SwiftMixin, HFDPOTrainer):
                 self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
                 self.ref_model.eval()
 
-        if not self.streaming:
+        if not self.streaming and not self.lazy_tokenize:
             train_ds_info = self.stat_dataset(self.train_dataset, self.is_encoder_decoder)
 
             if self.eval_dataset is not None:
@@ -84,6 +85,8 @@ class DPOTrainer(PushToMsHubMixin, SwiftMixin, HFDPOTrainer):
                 self.dataset_info = {'train_dataset': train_ds_info, 'val_dataset': val_ds_info}
             else:
                 self.dataset_info = {'train_dataset': train_ds_info}
+        else:
+            self.dataset_info = {}
         if test_oom_error:
             self.train_dataset = sort_by_max_length(self.train_dataset, 20000, self.is_encoder_decoder)
         # performance
@@ -201,12 +204,16 @@ class DPOTrainer(PushToMsHubMixin, SwiftMixin, HFDPOTrainer):
 
         if self.is_vision_model:
             # Here, we restore the _data, processing image information within the forward hook of the model.
-            batch_size = concatenated_batch['concatenated_input_ids'].shape[0]
+            pair_batch_size = concatenated_batch['concatenated_input_ids'].shape[0]
+            batch_size = pair_batch_size // 2
             if self.vision_keys is not None:
-                _data = [dict() for _ in range(batch_size)]
+                _data = [dict() for _ in range(pair_batch_size)]
                 for k in self.vision_keys:
                     if k in ['input_ids', 'labels']:
-                        _data = [{**d, k: concatenated_batch[f'concatenated_{k}'][i]} for i, d in enumerate(_data)]
+                        order = [i for pair in [(i, i + batch_size) for i in range(batch_size)] for i in pair]
+                        _data = [{
+                            **d, k: concatenated_batch[f'concatenated_{k}'][order[i]]
+                        } for i, d in enumerate(_data)]
                     # for vision related data, paired response share the same one
                     elif k == 'images':
                         # convert the dtype of the images that may be converted to float32 in tokenize_row

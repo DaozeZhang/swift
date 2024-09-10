@@ -208,6 +208,8 @@ class ModelType:
     llama3_1_405b_instruct_awq = 'llama3_1-405b-instruct-awq'
     llama3_1_405b_instruct_gptq_int4 = 'llama3_1-405b-instruct-gptq-int4'
     llama3_1_405b_instruct_bnb = 'llama3_1-405b-instruct-bnb'
+    # reflection
+    reflection_llama_3_1_70b = 'reflection-llama_3_1-70b'
     # long writer
     longwriter_glm4_9b = 'longwriter-glm4-9b'
     longwriter_llama3_1_8b = 'longwriter-llama3_1-8b'
@@ -378,6 +380,8 @@ class ModelType:
     deepseek_v2_chat = 'deepseek-v2-chat'
     deepseek_v2_lite = 'deepseek-v2-lite'
     deepseek_v2_lite_chat = 'deepseek-v2-lite-chat'
+    # deepseek-v2.5
+    deepseek_v2_5 = 'deepseek-v2_5'
     # gemma
     gemma_2b = 'gemma-2b'
     gemma_7b = 'gemma-7b'
@@ -401,6 +405,7 @@ class ModelType:
     minicpm_2b_chat = 'minicpm-2b-chat'
     minicpm_2b_128k = 'minicpm-2b-128k'
     minicpm_moe_8x2b = 'minicpm-moe-8x2b'
+    minicpm3_4b = 'minicpm3-4b'
     # minicpm-v
     minicpm_v_3b_chat = 'minicpm-v-3b-chat'
     minicpm_v_v2_chat = 'minicpm-v-v2-chat'
@@ -447,6 +452,7 @@ class ModelType:
     # owl
     mplug_owl2_chat = 'mplug-owl2-chat'  # llama
     mplug_owl2_1_chat = 'mplug-owl2_1-chat'  # qwen
+    mplug_owl3_7b_chat = 'mplug-owl3-7b-chat'
     # yuan
     yuan2_2b_instruct = 'yuan2-2b-instruct'
     yuan2_2b_janus_instruct = 'yuan2-2b-janus-instruct'
@@ -571,7 +577,9 @@ class LoRATM(NamedTuple):
     cogvlm = 'cogvlm'
     florence = 'florence'
     idefics3 = 'idefics3'
+    mplug_owl3 = 'mplug_owl3'
     # default lora target modules for nlp llms.
+    minicpm3 = ['q_a_proj', 'q_b_proj', 'kv_a_proj_with_mqa', 'kv_b_proj']
     baichuan = ['W_pack']
     chatglm = ['query_key_value']
     llama = ['q_proj', 'k_proj', 'v_proj']
@@ -937,6 +945,14 @@ def get_model_tokenizer_from_repo(model_dir: str,
         model.is_awq = is_awq
         model.is_aqlm = is_aqlm
     return model, tokenizer
+
+
+def get_device_hook(device):
+
+    def _device_hook(module, input, output):
+        return to_device(output, device)
+
+    return _device_hook
 
 
 def _output_device_map_hook(module, input, output):
@@ -1798,6 +1814,15 @@ def get_model_tokenizer_glm4v(model_dir: str,
     support_vllm=True,
     hf_model_id='openbmb/MiniCPM-2B-128k')
 @register_model(
+    ModelType.minicpm3_4b,
+    'OpenBMB/MiniCPM3-4B',
+    LoRATM.minicpm3,
+    TemplateType.chatml,
+    requires=['transformers>=4.36'],
+    support_flash_attn=True,
+    # support_vllm=True,
+    hf_model_id='openbmb/MiniCPM3-4B')
+@register_model(
     ModelType.phi3_4b_128k_instruct,
     'LLM-Research/Phi-3-mini-128k-instruct',
     LoRATM.phi3,
@@ -2236,7 +2261,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ModelType.yi_6b_chat,
     '01ai/Yi-6B-Chat',
     LoRATM.llama,
-    TemplateType.yi,
+    TemplateType.chatml,
     eos_token='<|im_end|>',
     support_flash_attn=True,
     support_vllm=True,
@@ -2246,7 +2271,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ModelType.yi_6b_chat_awq,
     '01ai/Yi-6B-Chat-4bits',
     LoRATM.llama,
-    TemplateType.yi,
+    TemplateType.chatml,
     eos_token='<|im_end|>',
     requires=['autoawq'],
     torch_dtype=torch.float16,
@@ -2259,7 +2284,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ModelType.yi_6b_chat_int8,
     '01ai/Yi-6B-Chat-8bits',
     LoRATM.llama,
-    TemplateType.yi,
+    TemplateType.chatml,
     eos_token='<|im_end|>',
     requires=['auto_gptq'],
     torch_dtype=torch.float16,
@@ -2271,7 +2296,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ModelType.yi_34b_chat,
     '01ai/Yi-34B-Chat',
     LoRATM.llama,
-    TemplateType.yi,
+    TemplateType.chatml,
     eos_token='<|im_end|>',
     support_flash_attn=True,
     support_vllm=True,
@@ -2281,7 +2306,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ModelType.yi_34b_chat_awq,
     '01ai/Yi-34B-Chat-4bits',
     LoRATM.llama,
-    TemplateType.yi,
+    TemplateType.chatml,
     eos_token='<|im_end|>',
     requires=['autoawq'],
     torch_dtype=torch.float16,
@@ -2294,7 +2319,7 @@ def get_model_tokenizer_glm4v(model_dir: str,
     ModelType.yi_34b_chat_int8,
     '01ai/Yi-34B-Chat-8bits',
     LoRATM.llama,
-    TemplateType.yi,
+    TemplateType.chatml,
     eos_token='<|im_end|>',
     requires=['auto_gptq'],
     torch_dtype=torch.float16,
@@ -2602,6 +2627,28 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
 
 
 @register_model(
+    ModelType.mplug_owl3_7b_chat,
+    'iic/mPLUG-Owl3-7B-240728',
+    LoRATM.mplug_owl3,
+    TemplateType.mplug_owl3,
+    requires=['transformers>=4.36', 'icecream'],  # decord
+    support_flash_attn=True,
+    tags=['multi-modal', 'vision'],
+    hf_model_id='mPLUG/mPLUG-Owl3-7B-240728')
+def get_model_tokenizer_mplug_owl3(model_dir: str,
+                                   torch_dtype: Dtype,
+                                   model_kwargs: Dict[str, Any],
+                                   load_model: bool = True,
+                                   **kwargs):
+    model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
+    processor = model.init_processor(tokenizer)
+    tokenizer.processor = processor
+    func_list = ['generate', 'forward']
+    _use_submodel_func(model, 'language_model', func_list)
+    return model, tokenizer
+
+
+@register_model(
     ModelType.yi_1_5_6b,
     '01ai/Yi-1.5-6B',
     LoRATM.llama,
@@ -2614,7 +2661,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_6b_chat,
     '01ai/Yi-1.5-6B-Chat',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     support_flash_attn=True,
     support_vllm=True,
     support_lmdeploy=True,
@@ -2623,7 +2670,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_6b_chat_awq_int4,
     'AI-ModelScope/Yi-1.5-6B-Chat-AWQ',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     requires=['autoawq'],
     torch_dtype=torch.float16,
     function_kwargs={'is_awq': True},
@@ -2635,7 +2682,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_6b_chat_gptq_int4,
     'AI-ModelScope/Yi-1.5-6B-Chat-GPTQ',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     requires=['auto_gptq>=0.5'],
     function_kwargs={'gptq_bits': 4},
     torch_dtype=torch.float16,
@@ -2646,7 +2693,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_9b_chat_awq_int4,
     'AI-ModelScope/Yi-1.5-9B-Chat-AWQ',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     requires=['autoawq'],
     torch_dtype=torch.float16,
     function_kwargs={'is_awq': True},
@@ -2658,7 +2705,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_9b_chat_gptq_int4,
     'AI-ModelScope/Yi-1.5-9B-Chat-GPTQ',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     requires=['auto_gptq>=0.5'],
     function_kwargs={'gptq_bits': 4},
     torch_dtype=torch.float16,
@@ -2669,7 +2716,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_34b_chat_awq_int4,
     'AI-ModelScope/Yi-1.5-34B-Chat-AWQ',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     requires=['autoawq'],
     torch_dtype=torch.float16,
     function_kwargs={'is_awq': True},
@@ -2681,7 +2728,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_34b_chat_gptq_int4,
     'AI-ModelScope/Yi-1.5-34B-Chat-GPTQ',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     requires=['auto_gptq>=0.5'],
     function_kwargs={'gptq_bits': 4},
     torch_dtype=torch.float16,
@@ -2701,7 +2748,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_9b_chat,
     '01ai/Yi-1.5-9B-Chat',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     support_flash_attn=True,
     support_vllm=True,
     support_lmdeploy=True,
@@ -2710,7 +2757,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_9b_chat_16k,
     '01ai/Yi-1.5-9B-Chat-16K',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     support_flash_attn=True,
     support_vllm=True,
     support_lmdeploy=True,
@@ -2728,7 +2775,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_34b_chat,
     '01ai/Yi-1.5-34B-Chat',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     support_flash_attn=True,
     support_vllm=True,
     support_lmdeploy=True,
@@ -2737,7 +2784,7 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
     ModelType.yi_1_5_34b_chat_16k,
     '01ai/Yi-1.5-34B-Chat-16K',
     LoRATM.llama,
-    TemplateType.yi1_5,
+    TemplateType.chatml,
     support_flash_attn=True,
     support_vllm=True,
     support_lmdeploy=True,
@@ -4141,35 +4188,24 @@ def get_model_tokenizer_internlm2(model_dir: str,
     tags=['moe'],
     requires=['transformers>=4.39.3'],
     hf_model_id='deepseek-ai/DeepSeek-V2-Chat')
+@register_model(
+    ModelType.deepseek_v2_5,
+    'deepseek-ai/DeepSeek-V2.5',
+    LoRATM.deepseek2,
+    TemplateType.deepseek2_5,
+    support_flash_attn=True,
+    support_vllm=True,
+    tags=['moe'],
+    requires=['transformers>=4.39.3'],
+    hf_model_id='deepseek-ai/DeepSeek-V2.5')
 def get_model_tokenizer_deepseek2(model_dir: str,
                                   torch_dtype: Dtype,
                                   model_kwargs: Dict[str, Any],
                                   load_model: bool = True,
                                   **kwargs):
-    model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-    use_flash_attn = kwargs.pop('use_flash_attn', False)
-    model_config._attn_implementation = 'flash_attention_2' if use_flash_attn else 'eager'
-    model, tokenizer = get_model_tokenizer_from_repo(
-        model_dir, torch_dtype, model_kwargs, load_model, model_config=model_config, **kwargs)
+    model, tokenizer = get_model_tokenizer_deepseek_moe(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
     if model is not None:
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
-        # fix dtype bug
-        mlp_cls = model.model.layers[1].mlp.__class__
-        for module in model.modules():
-            if isinstance(module, mlp_cls):
-                if not hasattr(module, '__old_forward'):  # Avoid double patching
-                    __old_forward = module._old_forward if hasattr(module, '_old_forward') else module.forward
-
-                    def _new_forward(hidden_states, *, __old_forward) -> Tensor:
-                        dtype = hidden_states.dtype
-                        return __old_forward(hidden_states).to(dtype)
-
-                    _new_forward = partial(_new_forward, __old_forward=__old_forward)
-                    if hasattr(module, '_old_forward'):  # device_map
-                        module._old_forward = _new_forward
-                    else:
-                        module.forward = _new_forward
-                    module.__old_forward = __old_forward
     return model, tokenizer
 
 
@@ -4537,9 +4573,6 @@ def git_clone_github(github_url: str,
 
 
 def _use_submodel_func(model, submodel_name: str, func_list: List[str]) -> None:
-    if hasattr(model, '_is_patching'):
-        return
-    model._is_patching = True
     submodel = getattr(model, submodel_name)
 
     def _get_new_func(func_name: str):
@@ -4552,7 +4585,8 @@ def _use_submodel_func(model, submodel_name: str, func_list: List[str]) -> None:
                 device = find_device(args)
                 if device is None:
                     device = find_device(kwargs)
-                res = res.__class__(**to_device(res, device))
+                res.logits = to_device(res.logits, device)
+                res.loss = to_device(res.loss, device)
             return res
 
         return _new_func
@@ -4707,6 +4741,15 @@ def get_model_tokenizer_deepseek_vl(model_dir: str,
     support_vllm=True,
     requires=['transformers>=4.43', 'bitsandbytes'],
     hf_model_id='unsloth/Meta-Llama-3.1-70B-Instruct-bnb-4bit')
+@register_model(
+    ModelType.reflection_llama_3_1_70b,
+    'LLM-Research/Reflection-Llama-3.1-70B',
+    LoRATM.llama,
+    TemplateType.reflection,
+    support_flash_attn=True,
+    support_vllm=True,
+    requires=['transformers>=4.43'],
+    hf_model_id='mattshumer/Reflection-Llama-3.1-70B')
 @register_model(
     ModelType.llama3_1_70b_instruct_gptq_int4,
     'LLM-Research/Meta-Llama-3.1-70B-Instruct-GPTQ-INT4',
@@ -5374,14 +5417,7 @@ def fix_qwen_inplace_bug(model) -> None:
     first_drop = model.transformer.drop
     if first_drop.p == 0.:
         # fix in-place operation bug
-        if not hasattr(first_drop, '__old_forward'):  # Avoid double patching
-            if hasattr(first_drop, '_old_forward'):  # device_map
-                __old_forward = first_drop._old_forward
-                first_drop._old_forward = lambda *args, **kwargs: __old_forward(*args, **kwargs).clone()
-            else:
-                __old_forward = first_drop.forward
-                first_drop.forward = lambda *args, **kwargs: __old_forward(*args, **kwargs).clone()
-            first_drop.__old_forward = __old_forward
+        first_drop.register_forward_hook(_clone_hook)
 
 
 def _qwen_vl_audio_decode(self, *args, skip_special_tokens=False, **kwargs) -> str:
@@ -5436,17 +5472,15 @@ def get_model_tokenizer_qwen_vl(model_dir: str,
     tokenizer_cls: Type[PreTrainedTokenizerBase] = get_class_from_dynamic_module(class_ref, model_dir)
     tokenizer_cls._auto_class = 'AutoTokenizer'
     tokenizer_cls.IMAGE_ST = ()  # fix no attr `self.IMAGE_ST` bug
-    if not hasattr(tokenizer_cls, '_old_decode'):  # avoid double patching
-        tokenizer_cls._old_decode = tokenizer_cls._decode
-        tokenizer_cls._decode = _qwen_vl_audio_decode
+    tokenizer_cls._old_decode = tokenizer_cls._decode
+    tokenizer_cls._decode = _qwen_vl_audio_decode
     # fix device_map is 4
     n_gpu = torch.cuda.device_count()
     local_world_size = get_dist_setting()[3]
     if n_gpu // local_world_size >= 4:
         visual_block_cls = get_class_from_dynamic_module('visual.VisualAttentionBlock', model_dir)
-        if not hasattr(visual_block_cls, '__old_forward'):  # avoid double patching
-            visual_block_cls.__old_forward = visual_block_cls.forward
-            visual_block_cls.forward = _qwen_vl_visual_block_forward
+        visual_block_cls.__old_forward = visual_block_cls.forward
+        visual_block_cls.forward = _qwen_vl_visual_block_forward
 
     kwargs['tokenizer'] = tokenizer_cls.from_pretrained(model_dir, trust_remote_code=True)
     model, tokenizer = get_qwen_function(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
@@ -5457,15 +5491,7 @@ def get_model_tokenizer_qwen_vl(model_dir: str,
             model.transformer.visual.proj.data = model.transformer.visual.proj.to(
                 model.transformer.visual.ln_post.bias.device)
         # fix images cuda:1 bug
-        vision_transformer = model.transformer.visual
-        if not hasattr(vision_transformer, '__old_forward'):
-            _old_forward = vision_transformer.forward
-
-            def _new_forward(x: torch.Tensor):
-                return _old_forward(x).to(device=f'{x.device.type}:0')
-
-            vision_transformer.__old_forward = _old_forward
-            vision_transformer.forward = _new_forward
+        model.transformer.visual.register_forward_hook(get_device_hook(0))
     return model, tokenizer
 
 
@@ -5498,9 +5524,8 @@ def get_model_tokenizer_qwen_audio(model_dir: str,
     tokenizer_cls: Type[PreTrainedTokenizerBase] = get_class_from_dynamic_module(class_ref, model_dir)
     tokenizer_cls._auto_class = 'AutoTokenizer'
     tokenizer_cls.AUDIO_ST = ()  # fix no attr `self.AUDIO_ST` bug
-    if not hasattr(tokenizer_cls, '_old_decode'):  # avoid double patching
-        tokenizer_cls._old_decode = tokenizer_cls._decode
-        tokenizer_cls._decode = _qwen_vl_audio_decode
+    tokenizer_cls._old_decode = tokenizer_cls._decode
+    tokenizer_cls._decode = _qwen_vl_audio_decode
     kwargs['tokenizer'] = tokenizer_cls.from_pretrained(model_dir, trust_remote_code=True)
     model, tokenizer = get_qwen_function(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
     if model is not None:
@@ -5780,21 +5805,13 @@ def get_model_tokenizer_deepseek_moe(model_dir: str,
     if model is not None:
         # fix dtype bug
         mlp_cls = model.model.layers[1].mlp.__class__
+
+        def _dtype_hook(module, input, output):
+            return output.to(input[0].dtype)
+
         for module in model.modules():
             if isinstance(module, mlp_cls):
-                if not hasattr(module, '__old_forward'):  # Avoid double patching
-                    __old_forward = module._old_forward if hasattr(module, '_old_forward') else module.forward
-
-                    def _new_forward(hidden_states, *, __old_forward) -> Tensor:
-                        dtype = hidden_states.dtype
-                        return __old_forward(hidden_states).to(dtype)
-
-                    _new_forward = partial(_new_forward, __old_forward=__old_forward)
-                    if hasattr(module, '_old_forward'):  # device_map
-                        module._old_forward = _new_forward
-                    else:
-                        module.forward = _new_forward
-                    module.__old_forward = __old_forward
+                module.register_forward_hook(_dtype_hook)
     return model, tokenizer
 
 
@@ -5940,30 +5957,23 @@ def get_model_tokenizer_yi_vl(model_dir: str,
 def _patch_minicpm_v_device_map(model) -> None:
     if not hasattr(model, 'hf_device_map') or len(model.hf_device_map.values()) == 1:
         return
-    if hasattr(model.llm, '__old_forward'):
-        # avoid double patching
-        return
-    device = list(model.hf_device_map.values())[0]
-    if hasattr(model, 'get_vision_embedding'):  # minicpm-v-v2-chat
-        _old_get_vision_embedding = model.get_vision_embedding
 
-        def _get_vision_embedding(pixel_values):
+    device = list(model.hf_device_map.values())[0]
+    if hasattr(model, 'get_vision_embedding') and not hasattr(model, '_old_get_vision_embedding'):
+        # minicpm-v-v2-chat; avoid double patching
+        _old_get_vision_embedding = model.__class__.get_vision_embedding
+
+        def _get_vision_embedding(self, pixel_values):
             if len(pixel_values) == 0:
-                return _old_get_vision_embedding(pixel_values)
-            output = _old_get_vision_embedding(pixel_values)
+                return _old_get_vision_embedding(self, pixel_values)
+            output = _old_get_vision_embedding(self, pixel_values)
             return output.to(device=device)
 
-        model._old_get_vision_embedding = _old_get_vision_embedding
-        model.get_vision_embedding = _get_vision_embedding
+        model.__class__._old_get_vision_embedding = _old_get_vision_embedding
+        model.__class__.get_vision_embedding = _get_vision_embedding
 
     if hasattr(model, 'resampler'):  # minicpm-v-v2_5-chat
-        __old_resampler_forward = model.resampler.forward
-
-        def _new_resampler_forward(*args, **kwargs) -> Tensor:
-            output = __old_resampler_forward(*args, **kwargs)
-            return output.to(device=device)
-
-        model.resampler.forward = _new_resampler_forward
+        model.resampler.register_forward_hook(get_device_hook(device))
 
 
 @register_model(
