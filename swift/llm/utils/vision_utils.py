@@ -193,8 +193,8 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
         for frame_index in frame_indices:
             images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
 
-        for i in range(num_segments):
-            images[i].save(f'/mnt/nas1/daoze/code/swift/__uniform_{int(frame_indices[i]/fps)}sec.jpg')
+        # for i in range(num_segments):
+            # images[i].save(f'/mnt/nas1/daoze/code/swift/__uniform_{int(frame_indices[i]/fps)}sec.jpg')
         return images
     else:
         import decord
@@ -207,7 +207,7 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
         frames = [frame.float().to(device) for frame in vr[::int(down_sample)] ]
         frames = torch.stack(frames)  # (N, H, W, C)
 
-        N, H, W, C = frames.shape   # N是视频的总帧数
+        N, H, W, C = frames.shape
         h_grid_num, w_grid_num = 4, 4
         assert H % h_grid_num == 0 and W % w_grid_num == 0
         grid_h, grid_w = H // h_grid_num, W // w_grid_num
@@ -244,30 +244,32 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
             frames[semantic_indices][i, :, :, :].squeeze(0).type(torch.uint8)
         ) for i in range(num_segments) ]
 
-        for i in range(num_segments):
-            semantic_images[i].save(f'/mnt/nas1/daoze/code/swift/__seman_{int(semantic_indices[i]/fps)}sec.jpg')
+        # for i in range(num_segments):
+        #     semantic_images[i].save(f'/mnt/nas1/daoze/code/swift/__seman_{int(semantic_indices[i]/fps)}sec.jpg')
+
+        plot_fig = False
+        if plot_fig:
+            import matplotlib.pyplot as plt
+            # 将Tensor转换为NumPy数组
+            data_array = difference.cpu().numpy()
+            red_points_indices = key_indices.cpu().numpy()
+
+            # 绘制折线图
+            plt.figure(figsize=(10, 5))
+            plt.plot(data_array, label='Data', color='blue')
+
+            # 在指定位置标记红色点
+            for index in red_points_indices:
+                plt.plot(index, data_array[index], 'ro')  # 'ro' 表示红色圆形标记
+
+            plt.legend()
+            plt.xlabel('Index')
+            plt.ylabel('Diff')
+
+            plt.grid(True)
+            plt.show()
+
         return semantic_images
-
-
-        import matplotlib.pyplot as plt
-        # 将Tensor转换为NumPy数组
-        data_array = difference.cpu().numpy()
-        red_points_indices = key_indices.cpu().numpy()
-
-        # 绘制折线图
-        plt.figure(figsize=(10, 5))
-        plt.plot(data_array, label='Data', color='blue')
-
-        # 在指定位置标记红色点
-        for index in red_points_indices:
-            plt.plot(index, data_array[index], 'ro')  # 'ro' 表示红色圆形标记
-
-        plt.legend()
-        plt.xlabel('Index')
-        plt.ylabel('Diff')
-
-        plt.grid(True)
-        plt.show()
 
 
 
