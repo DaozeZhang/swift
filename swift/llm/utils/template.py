@@ -579,7 +579,7 @@ class Template:
         system: Optional[str] = example.get('system', None)
         is_multi_modal: bool = any([example.get(key) for key in Template.special_keys])
 
-        inputs, tokenizer_kwargs = self._concat_and_tokenize(
+        inputs, tokenizer_kwargs = self._concat_and_tokenize(   # 这里会暗中将example中的images设为采样帧
             query,
             query_role,
             response,

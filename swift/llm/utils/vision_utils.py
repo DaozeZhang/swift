@@ -177,17 +177,98 @@ def transform_image(image, input_size=448, max_num=12):
 
 @load_file_decorator
 def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
-    from decord import VideoReader, cpu
-    from PIL import Image
-    vr = VideoReader(video_io, ctx=cpu(0), num_threads=1)
-    max_frame = len(vr) - 1
-    fps = float(vr.get_avg_fps())
+    use_key_frames = False
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # video_io = '/mnt/workspace/.cache/modelscope/media_resources/video_chatgpt/Test_Videos/v_vAHR3iJhBXU.mp4'
 
-    images = []
-    frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
-    for frame_index in frame_indices:
-        images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
-    return images
+    if not use_key_frames:
+        from decord import VideoReader, cpu
+        from PIL import Image
+        vr = VideoReader(video_io, ctx=cpu(0), num_threads=1)
+        max_frame = len(vr) - 1
+        fps = float(vr.get_avg_fps())
+
+        images = []
+        frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
+        for frame_index in frame_indices:
+            images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
+
+        for i in range(num_segments):
+            images[i].save(f'/mnt/nas1/daoze/code/swift/__uniform_{int(frame_indices[i]/fps)}sec.jpg')
+        return images
+    else:
+        import decord
+        decord.bridge.set_bridge('torch')
+        vr = decord.VideoReader(video_io, ctx=decord.cpu(0), num_threads=1)
+        fps = float(vr.get_avg_fps())
+
+        down_sample = fps
+        fps = fps / down_sample
+        frames = [frame.float().to(device) for frame in vr[::int(down_sample)] ]
+        frames = torch.stack(frames)  # (N, H, W, C)
+
+        N, H, W, C = frames.shape   # N是视频的总帧数
+        h_grid_num, w_grid_num = 4, 4
+        assert H % h_grid_num == 0 and W % w_grid_num == 0
+        grid_h, grid_w = H // h_grid_num, W // w_grid_num
+        n_bin = 32
+
+        frames = frames.permute(0, 3, 1, 2)   # (N, H, W, C) => (N, C, H, W)
+        unfold = torch.nn.Unfold(kernel_size=(grid_h, grid_w), stride=(grid_h, grid_w))
+        patches = unfold(frames)
+        patches = patches.reshape(N, C, grid_h, grid_w, h_grid_num*w_grid_num)
+
+        patches = patches.permute(0, 1, 4, 2, 3).reshape(N * C * h_grid_num*w_grid_num, grid_h, grid_w)
+        histograms = [torch.histc(patches[i].flatten(), bins=n_bin, min=0, max=255) for i in range(patches.shape[0]) ]
+        histograms = torch.stack(histograms).reshape(N, C, h_grid_num*w_grid_num, -1)    # (N, C, n_patch, n_bin)
+        difference = torch.diff(histograms, dim=0)  # (N-1, C, n_patch, n_bin)
+        difference = torch.sum(torch.abs(difference), dim=(1, 2, 3)) / (C * H * W * n_bin * 255)
+
+        def find_peaks(tensor):
+            padded_tensor = torch.concat([tensor.new_zeros(1), tensor, tensor.new_zeros(1)])
+            is_peak = (padded_tensor[:-2] < padded_tensor[1:-1]) & (padded_tensor[1:-1] > padded_tensor[2:])
+            peak_values = tensor[is_peak]
+            peak_indices = tensor.nonzero(as_tuple=False)[is_peak]
+            return peak_values, peak_indices
+        # top_values, top_indices = torch.topk(difference, k=num_segments+1, dim=0, largest=True)
+        peak_values, peak_indices = find_peaks(difference)
+        top_peaks_values, top_peaks_indices = torch.topk(peak_values, k=num_segments+1, dim=0, largest=True)
+        key_indices = peak_indices[top_peaks_indices]
+
+        sort_key_indices = sorted(key_indices)
+        semantic_indices = [ (sort_key_indices[i] + sort_key_indices[i+1]) // 2 for i in range(num_segments) ]
+        semantic_indices = torch.tensor(semantic_indices).to(device)
+
+        import torchvision.transforms as transforms
+        semantic_images = [ transforms.ToPILImage()(
+            frames[semantic_indices][i, :, :, :].squeeze(0).type(torch.uint8)
+        ) for i in range(num_segments) ]
+
+        for i in range(num_segments):
+            semantic_images[i].save(f'/mnt/nas1/daoze/code/swift/__seman_{int(semantic_indices[i]/fps)}sec.jpg')
+        return semantic_images
+
+
+        import matplotlib.pyplot as plt
+        # 将Tensor转换为NumPy数组
+        data_array = difference.cpu().numpy()
+        red_points_indices = key_indices.cpu().numpy()
+
+        # 绘制折线图
+        plt.figure(figsize=(10, 5))
+        plt.plot(data_array, label='Data', color='blue')
+
+        # 在指定位置标记红色点
+        for index in red_points_indices:
+            plt.plot(index, data_array[index], 'ro')  # 'ro' 表示红色圆形标记
+
+        plt.legend()
+        plt.xlabel('Index')
+        plt.ylabel('Diff')
+
+        plt.grid(True)
+        plt.show()
+
 
 
 def draw_plot(img_dir: str, bbox: List[int], bbox_type: str, output_file: str):
