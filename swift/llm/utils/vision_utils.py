@@ -231,6 +231,8 @@ def get_semantic_indices(video, ori_fps, num_segments ):
         return peak_values, peak_indices.squeeze()
 
     peak_values, peak_indices = find_peaks(difference, device)
+    if len(peak_values) < num_segments + 1:
+        return torch.linspace(0,  frames.shape[0] - 1, num_segments).round().int(), frames, new_fps
 
     keep_mask = torch.tensor([True] * len(peak_indices)).to(device)
     key_indices = []
@@ -250,7 +252,7 @@ def get_semantic_indices(video, ori_fps, num_segments ):
     draw_key_indices(difference, key_indices)
 
     semantic_indices = [round((sort_key_indices[i] + sort_key_indices[i + 1]) / 2) for i in range(num_segments)]
-    semantic_indices = torch.tensor(semantic_indices).to(device)
+    semantic_indices = torch.tensor(semantic_indices)
     return semantic_indices, frames, new_fps
 
 
@@ -262,11 +264,14 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     max_frame = len(vr) - 1
     fps = float(vr.get_avg_fps())
 
-    use_key_frames = False
+    use_key_frames = True
     if use_key_frames:
         frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
     else:
+        import time
+        start = time.time()
         frame_indices, vr, new_fps = get_semantic_indices(vr, fps, num_segments)
+        print(f"Getting semantic indices: {time.time() - start:.2f} sec used.")
 
     images = []
     for frame_index in frame_indices:
@@ -390,14 +395,16 @@ def load_video_qwen2(video_path: str):
     if not (size_factor <= nframes and nframes <= video.size(0)):
         raise ValueError(f'nframes should in interval [{size_factor}, {video.size(0)}], but got {nframes}.')
 
-    use_key_frames = False
+    use_key_frames = True
     ori_fps = info['video_fps']
     if not use_key_frames:
         idx = torch.linspace(0, video.size(0) - 1, nframes).round().long()
         new_fps = ori_fps
     else:
+        import time
+        start = time.time()
         idx, video, new_fps = get_semantic_indices(video=video, ori_fps=ori_fps, num_segments=nframes)
-        idx = idx.cpu()
+        print(f"Getting semantic indices: {time.time() - start:.2f} sec used.")
 
     height, width = video.shape[2:]
     video = video[idx]
@@ -436,11 +443,11 @@ def load_video_qwen2(video_path: str):
     if use_key_frames:
         video = torch.clamp(video, 0, 255).type(torch.uint8)  # 使用关键帧后 上面一步resize会导致图像超出范围 并且要转成uint8
 
-    import torchvision.transforms as transforms
-    save_type_str = '_uniform' if not use_key_frames else '_semantic'
-    for i in range(nframes):
-        img = transforms.ToPILImage()(video[i].type(torch.uint8))
-        img.save(f'/mnt/nas1/daoze/code/swift/_qwen2vl_{save_type_str}_{int(idx[i]/new_fps)}sec.jpg')
+    # import torchvision.transforms as transforms
+    # save_type_str = '_uniform' if not use_key_frames else '_semantic'
+    # for i in range(nframes):
+    #     img = transforms.ToPILImage()(video[i].type(torch.uint8))
+    #     img.save(f'/mnt/nas1/daoze/code/swift/_qwen2vl_{save_type_str}_{int(idx[i]/new_fps)}sec.jpg')
 
     return video
 
