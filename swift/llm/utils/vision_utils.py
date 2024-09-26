@@ -199,7 +199,10 @@ def get_semantic_indices(video, ori_fps, num_segments ):
 
     down_sample = ori_fps   # 下采样到一秒一帧
     new_fps = ori_fps / down_sample
-    frames = [frame.float().to(device) for frame in video[ ::round(down_sample) ]]
+    if isinstance(video, torch.Tensor):
+        frames = video[::round(down_sample), :, :, :]
+    else:   # video is VideoReader obj
+        frames = [torch.tensor(video[i].asnumpy()).float().to(device) for i in range(0, len(video), round(down_sample)) ]
     frames = torch.stack(frames)
 
     if frames.shape[1] != 3:    # (N, H, W, C) -> (N, C, H, W)
@@ -265,7 +268,7 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     fps = float(vr.get_avg_fps())
 
     use_key_frames = True
-    if use_key_frames:
+    if not use_key_frames:
         frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
     else:
         import time
