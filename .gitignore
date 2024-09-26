@@ -131,7 +131,7 @@ output/
 *.out
 benchmarks/
 eval_outputs/
-transformers/
+custom_code/
 
 # Pytorch
 *.pth
