@@ -184,6 +184,7 @@ class DatasetName:
     video_chatgpt = 'video-chatgpt'
     egoschema = 'egoschema'
     ego4d_video = 'ego4d-video'
+    activitynetqa = 'activitynetqa'
 
     # rlhf
     hh_rlhf = 'hh-rlhf'
@@ -905,7 +906,7 @@ def _preprocess_egoschema(dataset: DATASET_TYPE) -> DATASET_TYPE:
     for i in range(1, 6):
         url = f'https://modelscope.cn/datasets/AI-ModelScope/egoschema/resolve/master/videos_chunked_0{i}.zip'
         local_dir = MediaCache.download(url, 'egoschema')
-    ...
+
     local_dir = os.path.join(local_dir, 'videos')
     mp4_set = [file[:-4] for file in os.listdir(local_dir) if file.endswith('mp4')]
 
@@ -934,20 +935,52 @@ register_dataset(
     tags=['chat', 'multi-modal', 'video'])
 
 
-def _preprocess_ego4d_video(dataset: DATASET_TYPE) -> DATASET_TYPE:
-    for i in range(1, 53):
-        url = f'https://modelscope.cn/datasets/AI-ModelScope/ego4d-video/resolve/master/ego4d_video.z{i:02d}'
-        local_dir = MediaCache.download(url, 'ego4d_video')
-    ...
-    # try except: this dataset does not support online downloading and extracting because its video files are not tar or zip format, please download it to...
+# def _preprocess_ego4d_video(dataset: DATASET_TYPE) -> DATASET_TYPE:
+#     for i in range(1, 53):
+#         url = f'https://modelscope.cn/datasets/AI-ModelScope/ego4d-video/resolve/master/ego4d_video.z{i:02d}'
+#         local_dir = MediaCache.download(url, 'ego4d_video')
+#     ...
+#     # try except: this dataset does not support online downloading and extracting because its video files are not tar or zip format, please download it to...
+#     'zip -FF archive.zip --out fixed-archive.zip'
+#
+# register_dataset(
+#     DatasetName.ego4d_video,
+#     'AI-ModelScope/ego4d-video', None,
+#     _preprocess_ego4d_video,
+#     get_dataset_from_repo,
+#     split=['train'],
+#     hf_dataset_id='wofmanaf/ego4d-video',
+#     tags=['chat', 'multi-modal', 'video'])
+
+def _preprocess_activitynetqa(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    for i in range(1, 29):
+        url = f'https://www.modelscope.cn/datasets/AI-ModelScope/ActivityNetQA/resolve/master/videos_chunked_{i:02d}.zip'
+        local_dir = MediaCache.download(url, 'activitynetqa')
+
+    local_dir = os.path.join(local_dir, 'videos')
+    mp4_set = [file[:-4] for file in os.listdir(local_dir) if file.endswith('mp4')]
+
+    def _process(d):
+        transfer_to_option = {
+            '0': 'A', '1': 'B', '2': 'C', '3': 'D', '4': 'E',
+        }
+        if d['video_idx'] not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        return {
+            'query': d['question'] + '\n' + str(d['option']),
+            'response': transfer_to_option[d['answer']],
+            'videos': [os.path.join(local_dir, f"{d['video_idx']}.mp4")],
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
 
 register_dataset(
-    DatasetName.ego4d_video,
-    'AI-ModelScope/ego4d-video', None,
-    _preprocess_ego4d_video,
+    DatasetName.activitynetqa,
+    'AI-ModelScope/ActivityNetQA', None,
+    _preprocess_activitynetqa,
     get_dataset_from_repo,
-    split=['train'],
-    hf_dataset_id='wofmanaf/ego4d-video',
+    split=['test'],
+    hf_dataset_id='lmms-lab/ActivityNetQA',
     tags=['chat', 'multi-modal', 'video'])
 
 
