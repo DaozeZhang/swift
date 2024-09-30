@@ -198,24 +198,44 @@ def get_semantic_indices(video, ori_fps, num_segments ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     down_sample = ori_fps   # 下采样到一秒一帧
-    new_fps = ori_fps / down_sample
+    # new_fps = ori_fps / down_sample
     if isinstance(video, torch.Tensor):
         frames = video[::round(down_sample), :, :, :]
     else:   # video is VideoReader obj
-        frames = [torch.tensor(video[i].asnumpy()).float().to(device) for i in range(0, len(video), round(down_sample)) ]
-    frames = torch.stack(frames)
+        frames = video.get_batch(list(range(0, len(video), round(down_sample)))).asnumpy()
+        frames = torch.tensor(frames).to(device)
 
     if frames.shape[1] != 3:    # (N, H, W, C) -> (N, C, H, W)
         frames = frames.permute(0, 3, 1, 2)
 
+    if frames.shape[0] > 1000:  # very long video
+        from torchvision import transforms
+        from torchvision.transforms import InterpolationMode
+
+        N, C, H, W = frames.shape
+        frames = transforms.functional.resize(
+           frames.cpu(),    # also OOM if gpu
+           [H // 3, W // 3],
+           interpolation=InterpolationMode.BICUBIC,
+           antialias=True,
+       ).to(device)
+
     N, C, H, W = frames.shape
     h_grid_num, w_grid_num = 4, 4
-    assert H % h_grid_num == 0 and W % w_grid_num == 0, f'H={H}, h_grid_num={h_grid_num}; W={W}, w_grid_num={w_grid_num}'
+    if H % h_grid_num != 0:
+        trunc_H = H // h_grid_num * h_grid_num
+        frames = frames[:, :, :trunc_H, :]
+        print(f'Truncating H={H} to H={trunc_H} due to {H} % {h_grid_num} != 0')
+    if W % w_grid_num != 0:
+        trunc_W = W // w_grid_num * w_grid_num
+        frames = frames[:, :, :, :trunc_W]
+        print(f'Truncating W={W} to W={trunc_W} due to {W} % {w_grid_num} != 0')
+
     grid_h, grid_w = H // h_grid_num, W // w_grid_num
     n_bin = 32
 
     unfold = torch.nn.Unfold(kernel_size=(grid_h, grid_w), stride=(grid_h, grid_w))
-    patches = unfold(frames)
+    patches = unfold(frames.float())
     patches = patches.reshape(N, C, grid_h, grid_w, h_grid_num * w_grid_num)
 
     patches = patches.permute(0, 1, 4, 2, 3).reshape(N * C * h_grid_num * w_grid_num, grid_h, grid_w)
@@ -230,12 +250,12 @@ def get_semantic_indices(video, ori_fps, num_segments ):
                                       tensor.new_zeros(1).to(device)] )
         is_peak = (padded_tensor[:-2] < padded_tensor[1:-1]) & (padded_tensor[1:-1] > padded_tensor[2:])
         peak_values = tensor[is_peak]
-        peak_indices = tensor.nonzero(as_tuple=False)[is_peak]
-        return peak_values, peak_indices.squeeze()
+        peak_indices = torch.tensor(list(range(len(tensor)))).to(device)[is_peak]
+        return peak_values, peak_indices
 
     peak_values, peak_indices = find_peaks(difference, device)
     if len(peak_values) < num_segments + 1:
-        return torch.linspace(0,  frames.shape[0] - 1, num_segments).round().int(), frames, new_fps
+        return torch.linspace(0,  len(video)-1, num_segments).round().int()
 
     keep_mask = torch.tensor([True] * len(peak_indices)).to(device)
     key_indices = []
@@ -252,11 +272,13 @@ def get_semantic_indices(video, ori_fps, num_segments ):
     key_indices += peak_indices[top_peaks_indices].tolist()
 
     sort_key_indices = sorted(key_indices)
-    draw_key_indices(difference, key_indices)
+    # draw_key_indices(difference, key_indices)
 
     semantic_indices = [round((sort_key_indices[i] + sort_key_indices[i + 1]) / 2) for i in range(num_segments)]
-    semantic_indices = torch.tensor(semantic_indices)
-    return semantic_indices, frames, new_fps
+
+    seman_indices_in_ori =[round(down_sample) * idx for idx in semantic_indices]
+    seman_indices_in_ori = torch.tensor(seman_indices_in_ori)
+    return seman_indices_in_ori
 
 
 @load_file_decorator
@@ -273,7 +295,7 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     else:
         import time
         start = time.time()
-        frame_indices, vr, new_fps = get_semantic_indices(vr, fps, num_segments)
+        frame_indices = get_semantic_indices(vr, fps, num_segments).tolist()
         print(f"Getting semantic indices: {time.time() - start:.2f} sec used.")
 
     images = []
@@ -403,14 +425,13 @@ def load_video_qwen2(video_path: str):
         raise ValueError(f'nframes should in interval [{size_factor}, {video.size(0)}], but got {nframes}.')
 
     use_key_frames = True
-    ori_fps = info['video_fps']
+    fps = info['video_fps']
     if not use_key_frames:
         idx = torch.linspace(0, video.size(0) - 1, nframes).round().long()
-        new_fps = ori_fps
     else:
         import time
         start = time.time()
-        idx, video, new_fps = get_semantic_indices(video=video, ori_fps=ori_fps, num_segments=nframes)
+        idx = get_semantic_indices(video=video, ori_fps=fps, num_segments=nframes).tolist()
         print(f"Getting semantic indices: {time.time() - start:.2f} sec used.")
 
     height, width = video.shape[2:]
@@ -454,7 +475,7 @@ def load_video_qwen2(video_path: str):
     # save_type_str = '_uniform' if not use_key_frames else '_semantic'
     # for i in range(nframes):
     #     img = transforms.ToPILImage()(video[i].type(torch.uint8))
-    #     img.save(f'/mnt/nas1/daoze/code/swift/_qwen2vl_{save_type_str}_{int(idx[i]/new_fps)}sec.jpg')
+    #     img.save(f'/mnt/nas1/daoze/code/swift/_qwen2vl_{save_type_str}_{int(idx[i]/fps)}sec.jpg')
 
     return video
 
