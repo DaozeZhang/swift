@@ -4,6 +4,7 @@ import os
 import re
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime
 from functools import partial, wraps
 from types import MethodType
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypeVar, Union
@@ -62,6 +63,9 @@ class TemplateType:
     llama = 'llama'  # llama2
     llama3 = 'llama3'
     llama3_1_omni = 'llama3_1-omni'
+    llama3_2 = 'llama3_2'
+    llama3_2_vision = 'llama3_2-vision'
+    llama3_2_vision_generation = 'llama3_2-vision-generation'
     reflection = 'reflection'
     longwriter_llama3 = 'longwriter-llama3'
     # llava-hf
@@ -139,6 +143,7 @@ class TemplateType:
     mengzi = 'mengzi'
     c4ai = 'c4ai'
     chatml = 'chatml'
+    got_ocr2 = 'got_ocr2'
     # compatibility. (Deprecated)
     default_generation_bos = 'default-generation-bos'
     yi = 'yi'
@@ -399,62 +404,50 @@ class Template:
     def add_default_tags(self, example: Dict[str, Any]) -> None:
         history: History = deepcopy(example.get('history') or [])
         query: str = example.get('query') or ''
+        response: str = example.get('response') or ''
+        history.append([query, response])
         for media_key, media_tag in [('videos', '<video>'), ('images', '<image>'), ('audios', '<audio>')]:
             if example.get(media_key):
                 infer_media_type = TEMPLATE_MAPPING[self.template_type].get('infer_media_type')
                 if infer_media_type == 'round':
                     n_round = len(example[media_key])
-                    assert n_round == len(history) + 1
-                    for i, h, m in zip(range(n_round), history + [[query, None]], example[media_key]):
-                        num_media_tags = len(re.findall(media_tag, h[0]))
+                    assert n_round == len(history)
+                    for i, h, m in zip(range(n_round), history, example[media_key]):
+                        content = f'{h[0]}\n{h[1]}'
+                        num_media_tags = len(re.findall(media_tag, content))
                         if m:
                             assert num_media_tags <= 1, (
                                 'The model includes at most one media per round. However, '
-                                f'this round contains {num_media_tags} media_tags. query: {h[0]}')
+                                f'this round contains {num_media_tags} media_tags. query: {h[0]}, response: {h[1]}')
                             if num_media_tags == 0:
                                 h[0] = media_tag + h[0]
                         else:
                             assert num_media_tags == 0, f'Missing media. query: {h[0]}'
-                        if i == n_round - 1:
-                            query = h[0]
-                        else:
-                            history[i][0] = h[0]
+                        history[i][0] = h[0]
 
                     example[media_key] = [m for m in example[media_key] if m]
 
                 else:
-                    num_media_tags = len(re.findall(media_tag, '\n'.join([h[0] for h in history]) + f'\n{query}'))
+                    num_media_tags = len(re.findall(media_tag, '\n'.join([f'{h[0]}\n{h[1]}' for h in history])))
                     example[media_key] = [m for m in example[media_key] if m]
                     num_media = len(example[media_key])
                     num_new_tags = num_media - num_media_tags
                     assert num_new_tags >= 0, f'Number of media: {num_media}, number of media_tags: {num_media_tags}'
-                    if history:
-                        history[0][0] = media_tag * num_new_tags + history[0][0]
-                    else:
-                        query = media_tag * num_new_tags + query
-
-        example['query'] = query
-        example['history'] = history
+                    history[0][0] = media_tag * num_new_tags + history[0][0]
+        example['query'] = history[-1][0]
+        if example.get('response') is not None:
+            example['response'] = history[-1][1]
+        example['history'] = history[:-1]
 
     def replace_media_tags(self, example) -> None:
-        # Parse <img></img> format images and merged into images key
-        if self.is_multimodal in {True, None}:  # If False, do not perform replace_img_tag
-            example['query'], example['history'], images_path = replace_img_tag(
-                example.get('query'),
-                example.get('history') or [], '<image>')
-
-            if example.get('images') and images_path:
-                raise ValueError('Do not mix use the <img></img> tag and <image> tag.')
-            example['images'] = example.get('images') or [] + images_path
-
-        # audio, video
         if self.is_multimodal in {True, None}:
-            for k, tag, pattern in zip(['audios', 'videos'], ['<audio>', '<video>'],
-                                       [r'<audio>(.+?)</audio>', r'<video>(.+?)</video>']):
-                example['query'], example['history'], medias_path = replace_img_tag(
-                    example.get('query'),
+            for k, tag, pattern in zip(['images', 'audios', 'videos'], ['<image>', '<audio>', '<video>'],
+                                       [r'<img>(.+?)</img>', r'<audio>(.+?)</audio>', r'<video>(.+?)</video>']):
+                example['query'], example['response'], example['history'], medias_path = replace_img_tag(
+                    example.get('query'), example.get('response'),
                     example.get('history') or [], tag, pattern)
-
+                if example.get(k) and medias_path:
+                    raise ValueError(f'Do not mix use the {pattern} tag and {tag} tag.')
                 example[k] = example.get(k) or [] + medias_path
 
     def _preprocess_media(self, example):
@@ -808,6 +801,7 @@ class Template:
                 if context == f'<{k}>':
                     c_list = self.replace_tag(k, example[f'{k}_index'], example)
                     example[f'{k}_index'] += 1
+                    loss_scale = 0.
                     break
             else:
                 if context == '<ref-object>':
@@ -877,6 +871,7 @@ class Template:
         return: inputs, tokenizer_kwargs
         """
         history = history.copy()
+        history_roles = history_roles.copy()
 
         res_context_list: List[Context] = []
         loss_scale_list: List[float] = []
@@ -1233,6 +1228,61 @@ class QwenTemplateMixin(ChatmlTemplateMixin):
 
 class QwenTemplate(QwenTemplateMixin, Template):
     pass
+
+
+class GOTImageEvalProcessor:
+
+    def __init__(self, image_size=384, mean=None, std=None):
+        from torchvision import transforms
+        from torchvision.transforms.functional import InterpolationMode
+        if mean is None:
+            mean = (0.48145466, 0.4578275, 0.40821073)
+        if std is None:
+            std = (0.26862954, 0.26130258, 0.27577711)
+
+        self.normalize = transforms.Normalize(mean, std)
+
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            self.normalize,
+        ])
+
+    def __call__(self, item):
+        return self.transform(item)
+
+
+class GOT_OCR2Template(QwenTemplate):
+    system = '        You should follow the instructions carefully and explain your answers in detail.'
+
+    def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
+                    example: Dict[str, Any]) -> List[Context]:
+        # OCR:
+        # OCR with format:
+        assert media_type == 'image'
+        return ['<img>' + '<imgpad>' * 256 + '</img>\n']
+
+    def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        inputs, tokenizer_kwargs = super()._encode(example)
+        if len(inputs) == 0:
+            return inputs, {}
+        images = example['images']
+        image_processor_high = GOTImageEvalProcessor(image_size=1024)
+        for i, image in enumerate(images):
+            images[i] = image_processor_high(image)[None].to(self.model.dtype)
+        if images:
+            inputs['images'] = images
+        return inputs, {}
+
+    def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
+        res = super().data_collator(batch, padding_to)
+        images = _gather_list(batch, 'images')
+        if images:
+            res['images'] = images
+        return res
+
+
+register_template(TemplateType.got_ocr2, GOT_OCR2Template(), lazy_tokenize=True, use_model=True)
 
 
 class _QwenVLTemplateMixin:
@@ -1843,6 +1893,94 @@ register_template(TemplateType.reflection, ReflectionTemplate())
 register_template(TemplateType.llama3, Llama3Template())
 
 
+class Llama3_2TemplateMixin:
+    system = None
+
+    def __init__(self):
+        now = datetime.now()
+        date_string = now.strftime('%d %b %Y')
+        date_prompt = f'Cutting Knowledge Date: December 2023\nToday Date: {date_string}'
+        Template.__init__(
+            self, [
+                f'<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{date_prompt}\n\n'
+                '{{SYSTEM}}<|eot_id|>'
+            ], [
+                '<|start_header_id|>user<|end_header_id|>\n\n{{QUERY}}<|eot_id|>'
+                '<|start_header_id|>assistant<|end_header_id|>\n\n'
+            ], ['<|eot_id|>'], ['<|eot_id|>'],
+            self.system,
+            tools_prompt='toolbench',
+            tool_prompt=[
+                '<|start_header_id|>tool<|end_header_id|>\n\n{{QUERY}}<|eot_id|>'
+                '<|start_header_id|>assistant<|end_header_id|>\n\n'
+            ])
+
+
+class Llama3_2Template(Llama3_2TemplateMixin, Template):
+    pass
+
+
+register_template(TemplateType.llama3_2, Llama3_2Template())
+
+
+class Llama3_2VisionTemplateMixin:
+
+    def replace_tag(self, media_type, index, example) -> List[Context]:
+        assert media_type == 'image'
+        return ['<|image|>']
+
+    def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        from transformers.models.mllama.processing_mllama import (get_cross_attention_token_mask,
+                                                                  convert_sparse_cross_attention_mask_to_dense)
+        inputs, _ = super()._encode(example)
+        if len(inputs) == 0:
+            return inputs, {}
+        images = example['images']
+        if images:
+            input_ids = inputs['input_ids']
+            processor = self.tokenizer.processor
+            image_features = processor.image_processor(images, return_tensors='pt')
+            num_tiles = image_features.pop('num_tiles')
+            inputs.update(image_features)
+
+            cross_attention_token_mask = [get_cross_attention_token_mask(input_ids, processor.image_token_id)]
+            cross_attention_mask = convert_sparse_cross_attention_mask_to_dense(
+                cross_attention_token_mask,
+                num_tiles=num_tiles,
+                max_num_tiles=processor.image_processor.max_image_tiles,
+                length=len(input_ids),
+            )
+            inputs['cross_attention_mask'] = torch.tensor(cross_attention_mask)
+
+        return inputs, {}
+
+    def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
+        res = super().data_collator(batch, padding_to)
+        for key in ['aspect_ratio_ids', 'aspect_ratio_mask']:
+            value = [b[key] for b in batch if b.get(key) is not None]
+            if value:
+                res[key] = torch.concat(value)
+
+        cross_attention_mask = [
+            b['cross_attention_mask'][0] for b in batch if b.get('cross_attention_mask') is not None
+        ]
+        if cross_attention_mask:
+            res['cross_attention_mask'] = self.pad_sequence(cross_attention_mask, 0, self.padding_side)
+        return res
+
+
+class Llama3_2VisionTemplate(Llama3_2VisionTemplateMixin, Llama3Template):
+    pass
+
+
+class Llama3_2VisionGenerationTemplate(Llama3_2VisionTemplateMixin, DefaultGenerationTemplate):
+    pass
+
+
+register_template(TemplateType.llama3_2_vision, Llama3_2VisionTemplate(), lazy_tokenize=True)
+register_template(TemplateType.llama3_2_vision_generation, Llama3_2VisionGenerationTemplate(), lazy_tokenize=True)
+
+
 class Llama3_1OmniTemplate(Llama3Template):
     system = ('You are a helpful language and speech assistant. '
               'You are able to understand the speech content that the user provides, '
@@ -1970,23 +2108,24 @@ register_template(TemplateType.internlm2, Internlm2Template())
 
 
 def replace_img_tag(query: str,
+                    response: Optional[str],
                     history: History,
                     replace_token: str,
-                    pattern=r'<img>(.+?)</img>') -> Tuple[str, History, List[str]]:
+                    pattern=r'<img>(.+?)</img>') -> Tuple[str, Optional[str], History, List[str]]:
     images_path = []
     new_history = []
+    history = history.copy()
+    history.append([query, response])
     for i, h in enumerate(history):
-        if h[0] is None:
-            new_history.append(h.copy())
-        else:
-            images_path += re.findall(pattern, h[0])
-            new_history.append([re.sub(pattern, replace_token, h[0]), h[1]])
-    if query is None:
-        new_query = query  # pretrain dataset
-    else:
-        images_path += re.findall(pattern, query)
-        new_query = re.sub(pattern, replace_token, query)
-    return new_query, new_history, images_path
+        new_h = []
+        for content in h:
+            if content is None:
+                new_h.append(content)
+            else:
+                images_path += re.findall(pattern, content)
+                new_h.append(re.sub(pattern, replace_token, content))
+        new_history.append(new_h)
+    return (*new_history[-1], new_history[:-1], images_path)
 
 
 class InternLMXComposer2Template(Template):
@@ -3422,6 +3561,7 @@ class mPlugOwl3Template(QwenTemplateMixin, Template):
         labels = inputs['labels']
         idx_list = _findall(input_ids, -100)
         processor = self.tokenizer.processor
+        inputs = {'_data': {}}
         if images:
             image_inputs = processor.image_processor(images, cut_enable=cut_enable, return_tensors='pt')
             added_tokens_len = 0
@@ -3441,21 +3581,23 @@ class mPlugOwl3Template(QwenTemplateMixin, Template):
             _range = torch.arange(len(input_ids))[:, None]
             matrix = (_range > image_token_idx).sum(dim=1)
             media_offset = torch.stack([torch.zeros(matrix.shape[0], dtype=torch.long), matrix], dim=-1)[None]
-            inputs['_data'] = {'pixel_values': image_inputs['pixel_values']}
-            inputs['media_offset'] = media_offset
-            inputs['num_images'] = image_inputs['pixel_values'].shape[0]
-        inputs['input_ids'] = input_ids
+            inputs['_data'].update({
+                'pixel_values': image_inputs['pixel_values'],
+                'media_offset': media_offset,
+            })
+        inputs['_data']['input_ids'] = input_ids
         inputs['labels'] = labels
         return inputs, {}
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:
-        image_embeds = model.forward_image(data['pixel_values'])
-        return {'image_embeds': image_embeds}
+        if 'pixel_values' in data:
+            pixel_values = data.pop('pixel_values')
+            data['image_embeds'] = model.forward_image(pixel_values)
+        return data
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         res = super().data_collator(batch, padding_to)
         image_embeds = [b['image_embeds'] for b in batch if 'image_embeds' in b]
-        num_images = [b['num_images'] if 'num_images' in b else 0 for b in batch]
         if image_embeds:
             res['image_embeds'] = torch.concat(image_embeds)
         media_offset = []
@@ -3471,7 +3613,7 @@ class mPlugOwl3Template(QwenTemplateMixin, Template):
                                                                   curr_media_offset.shape[2])
                     curr_media_offset = torch.concat([curr_media_offset, padding], dim=1)
                 media_offset.append(curr_media_offset + cusum_offset)
-                cusum_offset += num_images[bi]
+                cusum_offset += image_embeds[bi].shape[0]
 
         # media_offset = [b['media_offset'] for b in batch if 'media_offset' in b]
 

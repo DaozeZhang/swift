@@ -183,7 +183,7 @@ class DatasetName:
     # for video
     video_chatgpt = 'video-chatgpt'
     egoschema = 'egoschema'
-    ego4d_video = 'ego4d-video'
+    # ego4d_video = 'ego4d-video'
     activitynetqa = 'activitynetqa'
 
     # rlhf
@@ -912,7 +912,11 @@ def _preprocess_egoschema(dataset: DATASET_TYPE) -> DATASET_TYPE:
 
     def _process(d):
         transfer_to_option = {
-            '0': 'A', '1': 'B', '2': 'C', '3': 'D', '4': 'E',
+            '0': 'A',
+            '1': 'B',
+            '2': 'C',
+            '3': 'D',
+            '4': 'E',
         }
         if d['video_idx'] not in mp4_set:
             return {'query': None, 'response': None, 'videos': None}

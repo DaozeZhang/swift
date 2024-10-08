@@ -31,7 +31,7 @@ from .media import MediaTag
 from .model import (MODEL_MAPPING, dtype_mapping, get_additional_saved_files, get_default_lora_target_modules,
                     get_default_template_type)
 from .template import TEMPLATE_MAPPING
-from .utils import is_liger_available, is_lmdeploy_available, is_quant_model, is_vllm_available
+from .utils import get_mllm_arch, is_liger_available, is_lmdeploy_available, is_quant_model, is_vllm_available
 
 logger = get_logger()
 DATASET_TYPE = Union[HfDataset, HfIterableDataset]
@@ -1048,16 +1048,12 @@ class SftArguments(ArgumentsBase):
             if self.eval_steps is None:
                 self.eval_steps = 50
         elif self.sft_type == 'full':
-            from swift.utils.module_mapping import MODEL_KEYS_MAPPING
-            lora_target_modules = model_info.get('lora_target_modules')  # model_group
-            model_arch = None
-            if isinstance(lora_target_modules, str):
-                model_arch = MODEL_KEYS_MAPPING[lora_target_modules]
-            if model_arch:
-                if self.freeze_vit and model_arch.vision_tower:
-                    self.freeze_parameters += model_arch.vision_tower
-                if model_arch.generator:
-                    self.freeze_parameters += model_arch.generator
+            mllm_arch = get_mllm_arch(self.model_type)
+            if mllm_arch:
+                if self.freeze_vit and mllm_arch.vision_tower:
+                    self.freeze_parameters += mllm_arch.vision_tower
+                if mllm_arch.generator:
+                    self.freeze_parameters += mllm_arch.generator
             assert 0 <= self.freeze_parameters_ratio <= 1
             assert self.quantization_bit == 0, 'Full parameter fine-tuning does not support quantization.'
             assert self.dtype != 'fp16', ("Fine-tuning with dtype=='fp16' can lead to NaN issues. "
@@ -1550,7 +1546,7 @@ class InferArguments(ArgumentsBase):
             self.infer_media_type = 'interleave'
         self.media_type = template_info.get('media_type', 'image')
         self.media_key = MediaTag.media_keys.get(self.media_type, 'images')
-        if self.merge_device_map is None:
+        if self.merge_device_map is None and not isinstance(self, ExportArguments):
             self.merge_device_map = 'cpu'
 
     @staticmethod
@@ -1665,7 +1661,7 @@ class ExportArguments(InferArguments):
     quant_method: Literal['awq', 'gptq', 'bnb'] = 'awq'
     quant_n_samples: int = 256
     quant_seqlen: int = 2048
-    quant_device_map: str = 'cpu'  # e.g. 'cpu', 'auto'
+    quant_device_map: Optional[str] = None  # e.g. 'cpu', 'auto'
     quant_output_dir: Optional[str] = None
     quant_batch_size: int = 1
 
@@ -1688,8 +1684,8 @@ class ExportArguments(InferArguments):
     # merge_lora, hub_token
 
     def __post_init__(self):
-        if self.merge_device_map is None:
-            self.merge_device_map = 'cpu' if self.quant_bits > 0 else 'auto'
+        if self.merge_device_map is None and self.quant_bits > 0:
+            self.merge_device_map = 'cpu'
         if self.quant_bits > 0 and self.dtype == 'AUTO':
             self.dtype = 'fp16'
             logger.info(f'Setting args.dtype: {self.dtype}')
@@ -1795,6 +1791,8 @@ class RLHFArguments(SftArguments):
         if self.loss_type is None:
             if self.rlhf_type in ['dpo', 'cpo']:
                 self.loss_type = 'sigmoid'  # else None
+            elif self.rlhf_type in ['kto']:
+                self.loss_type = 'kto'
 
 
 @dataclass
