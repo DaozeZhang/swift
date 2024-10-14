@@ -13,6 +13,7 @@ import json
 import torch
 import torch.nn.functional as F
 import transformers
+from datasets.exceptions import DatasetNotFoundError
 from packaging import version
 from peft import PeftModel
 from torch.nn.utils.rnn import pad_sequence
@@ -100,6 +101,7 @@ class TemplateType:
     internvl2 = 'internvl2'
     internvl_phi3 = 'internvl-phi3'
     internvl2_phi3 = 'internvl2-phi3'
+    hierar_internvl2 = 'hierar-internvl2'
     florence = 'florence'
     yi_coder = 'yi-coder'
     yi_vl = 'yi-vl'
@@ -341,7 +343,11 @@ class Template:
                 data = kwargs.pop('_data')
                 for d in data:
                     res_extra.append(self._post_encode(module, d))
-                kwargs.update(to_device(self.data_collator(res_extra), module.device))
+                kwargs.update(
+                    to_device(self.data_collator(res_extra), module.device)
+                )
+                # 输入的res_extra里原本只有inputs_embeds  data_collator会构造出attention_mask 默认为全1
+                # 之后 kwargs.update构造出labels和input_ids 并放入kwargs中
                 if 'inputs_embeds' in kwargs:
                     kwargs.pop('input_ids', None)
 
@@ -2446,6 +2452,188 @@ register_template(
 register_template(TemplateType.internvl2, Internvl2Template(), use_model=True, lazy_tokenize=True)
 
 register_template(TemplateType.internvl2_phi3, Internvl2Phi3Template(), use_model=True, lazy_tokenize=True)
+
+
+class HierarInternvl2Template(InternvlTemplate):
+    video_segments = 8
+    system = '你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。'
+
+    def replace_tag(self, media_type, index, example) -> List[Context]:
+        image_context = super().replace_tag('image', index, example)
+        if media_type == 'image':
+            return image_context
+        elif media_type == 'video':
+            video_segments = get_env_args('video_segments', int, self.video_segments)
+            load_video = partial(load_video_internvl, num_segments=video_segments)
+            return _replace_video2image(load_video, example, lambda i: [f'Frame{i + 1}: '] + image_context)
+
+    def replace_object(self, index: int, example: Dict[str, Any]) -> List[Context]:
+        objects = example.get('objects')
+        if objects:
+            object_ = objects[index]
+            return [f'<ref>{object_["caption"]}</ref>']
+        else:
+            return ['<ref-object>']
+
+    def replace_box(self, index: int, example: Dict[str, Any]) -> List[Context]:
+        objects = example.get('objects')
+        if objects:
+            object_ = objects[index]
+            if isinstance(object_['bbox'][0], list):
+                all_objects = '<box> ['
+                for sub_object in object_['bbox']:
+                    all_objects += (f'[{sub_object[0]}, {sub_object[1]}, ' f'{sub_object[2]}, {sub_object[3]}],')
+                all_objects = all_objects[:-1]
+                all_objects += '] </box>'
+                return [all_objects]
+            else:
+                return [
+                    f'<box> [[{object_["bbox"][0]}, {object_["bbox"][1]}, '
+                    f'{object_["bbox"][2]}, {object_["bbox"][3]}]] </box>'
+                ]
+        else:
+            return ['<bbox>']
+
+    def insert_coaser_img(self, inputs, nframes):
+        input_ids = inputs['input_ids']
+        labels = inputs.get('labels')
+
+        img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
+        img_end_pos = _findall(input_ids, img_end_token_id)[-1] # the last </img>
+
+        llm_use_coasers = False
+        if llm_use_coasers:
+            i, cur_level_num = 0, nframes // 2
+            level_sizes = [nframes]
+            res: List[int] = self.tokenizer.encode(f'The aggregate visual tokens of different levels of these '
+                                                   f'video frame images are also given below, you can also refer to '
+                                                   f'them:\n', add_special_tokens=False)
+            while cur_level_num > 0:
+                one_coaser_img = \
+                    self.tokenizer.encode(f'Coaser Level{i}: <coaser_img>', add_special_tokens=False) + \
+                    self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1 + \
+                    self.tokenizer.encode('</coaser_img>\n', add_special_tokens=False)
+                res += one_coaser_img * cur_level_num
+
+                i += 1
+                level_sizes.append(cur_level_num)
+                cur_level_num = cur_level_num // 2
+        else:
+            i, cur_level_num = 0, nframes // 2
+            level_sizes = [nframes]
+            res = []
+            while cur_level_num > 0:
+                one_coaser_img = \
+                    self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1
+                res += one_coaser_img * cur_level_num
+
+                i += 1
+                level_sizes.append(cur_level_num)
+                cur_level_num = cur_level_num // 2
+
+        # </img> \n ...insert_coaser_img...
+        input_ids = input_ids[:img_end_pos + 2] + res + input_ids[img_end_pos + 2:]
+        if labels is not None:
+            labels = labels[:img_end_pos + 2] + [-100] * len(res) + labels[img_end_pos + 2:]
+
+        inputs['input_ids'] = input_ids
+        inputs['labels'] = labels
+        inputs['llm_use_coasers'] = llm_use_coasers
+        inputs['level_sizes'] = level_sizes
+        return inputs
+
+    def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        inputs, _ = super(InternvlTemplate, self)._encode(example)
+        inputs = self.insert_coaser_img(inputs, len(example.get('images')))
+        if len(inputs) == 0:
+            return inputs, {}
+        input_ids = inputs['input_ids']
+        idx_list = _findall(input_ids, -100)
+        labels = inputs.get('labels')
+        images = example.get('images')
+        if images:
+            has_video = bool(example.get('videos'))
+            input_size = get_env_args('input_size', int, 448)
+            max_num = get_env_args('max_num', int, 1 if has_video else 12)
+            pixel_values = [transform_image(image, input_size, max_num) for image in images]
+            num_patches = [pv.shape[0] for pv in pixel_values]
+            pixel_values = torch.cat(pixel_values).to(self.model.dtype)
+        else:
+            pixel_values = None
+            num_patches = []
+        assert len(num_patches) == len(
+            idx_list), f'len(num_patches): {len(num_patches)}, len(idx_list): {len(idx_list)}'
+        added_tokens_len = 0
+        for idx, num_patch in zip(idx_list, num_patches):
+            img_tokens: List[int] = self.tokenizer.encode(
+                '<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * num_patch
+            # 把idx位置的<> 替换为256个<IMG_CONTEXT>
+            input_ids = input_ids[:idx + added_tokens_len] + img_tokens + input_ids[idx + added_tokens_len + 1:]
+            if labels is not None:
+                labels = labels[:idx + added_tokens_len] + [-100] * len(img_tokens) + labels[idx + added_tokens_len
+                                                                                             + 1:]
+            added_tokens_len += len(img_tokens) - 1     # 255
+        # ...context... Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img> ...context...
+        inputs['input_ids'] = input_ids
+        inputs['labels'] = labels
+        inputs['_data'] = {'input_ids': torch.tensor(input_ids), 'pixel_values': pixel_values}
+        inputs.pop('loss_scale', None)
+
+        if inputs['llm_use_coasers']:
+            ...
+        else:
+            import numpy as np
+            img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False)
+            img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
+            vis_sta = np.array(_findall(input_ids, img_sta_token_id)) + 1
+            vis_end = np.array(_findall(input_ids, img_end_token_id)) - 1   # 闭区间
+            assert all(vis_end - vis_sta + 1 == self.num_image_token)
+
+            coaser_img_num = sum(inputs['level_sizes'][1:])
+            img_end_pos = _findall(input_ids, img_end_token_id)[-1]  # the last </img>
+
+            # </img> \n ...coaser_img...
+            coaser_sta = np.array([ i * self.num_image_token for i in range(coaser_img_num)]) + img_end_pos + 2
+            coaser_end = np.array([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + img_end_pos + 2    # 闭区间
+            inputs['vis_sta'], inputs['vis_end'] = vis_sta, vis_end
+            inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta, coaser_end
+
+        return inputs, {}
+
+    def _post_encode(self, model, data: Any) -> Dict[str, Any]:
+        embedding = model.get_input_embeddings()
+        device = embedding.weight.device
+        input_ids = data['input_ids']
+        inputs_embeds = embedding(input_ids[None])[0].to(device=device)
+        pixel_values = data['pixel_values']
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(device=device)
+            vit_embeds = model.extract_feature(pixel_values).to(device=device)
+            selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
+            # input_ids里 每一帧都形如<img> <IMG_CONTEXT>*256 </img> 找出<IMG_CONTEXT>位置替换为vit_embeds
+            inputs_embeds[selected] = vit_embeds.reshape(-1, vit_embeds.shape[-1])
+        else:
+            raise DatasetNotFoundError('No pixel values.')
+        # elif is_deepspeed_enabled():
+        #     dummy_pixel_values = torch.zeros((1, 3, 32, 32), device=device, dtype=inputs_embeds.dtype)
+        #     vit_embeds = model.extract_feature(dummy_pixel_values).to(device=device)
+        #     inputs_embeds += vit_embeds.mean() * 0.
+        return {'inputs_embeds': inputs_embeds}
+
+    def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
+        # 在enumerate(data_iterator)时会调用该函数 对获取到的batch进行处理 Template类的该函数只会保留默认的字段
+        res = super().data_collator(batch, padding_to)
+        res['vis_sta'] = torch.tensor([b['vis_sta'] for b in batch])
+        res['vis_end'] = torch.tensor([b['vis_end'] for b in batch])
+        res['coaser_sta'] = torch.tensor([b['coaser_sta'] for b in batch])
+        res['coaser_end'] = torch.tensor([b['coaser_end'] for b in batch])
+        res['llm_use_coasers'] = torch.tensor([b['llm_use_coasers'] for b in batch])
+        
+        # construct the attention_mask
+
+        return res
+
+register_template(TemplateType.hierar_internvl2, HierarInternvl2Template(), use_model=True, lazy_tokenize=True)
 
 
 class FlorenceTemplate(Template):

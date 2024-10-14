@@ -4481,7 +4481,7 @@ def get_model_tokenizer_deepseek2(model_dir: str,
     ModelType.hierar_internvl2,
     '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B',   # load 8B ckpt as init
     LoRATM.internvl,
-    TemplateType.internvl2,
+    TemplateType.hierar_internvl2,
     requires=['transformers>=4.36', 'timm'],
     ignore_file_pattern=[r'.+\.zip$'],
     support_flash_attn=True,

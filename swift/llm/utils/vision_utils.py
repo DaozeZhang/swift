@@ -289,7 +289,7 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     max_frame = len(vr) - 1
     fps = float(vr.get_avg_fps())
 
-    use_key_frames = True
+    use_key_frames = False
     if not use_key_frames:
         frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
     else:
