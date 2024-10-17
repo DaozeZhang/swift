@@ -280,6 +280,44 @@ def get_semantic_indices(video, ori_fps, num_segments ):
     seman_indices_in_ori = torch.tensor(seman_indices_in_ori)
     return seman_indices_in_ori
 
+def get_hierar_mask(bottom_size, array_sizes, neibor_size, device):
+    """Get the attention mask of PAM-Naive"""
+    input_size = bottom_size
+    window_size = array_sizes
+    inner_size = neibor_size
+
+    # Get the size of all layers
+    all_size = []
+    all_size.append(input_size)
+    for i in range(len(window_size)):
+        layer_size = math.floor(all_size[i] / window_size[i])   # window_size是[4,4,4]的列表 构造四叉树 共构造三层
+        all_size.append(layer_size)
+    # all_size是[168, 42, 10, 2]的列表 即各层的节点数
+    seq_length = sum(all_size)  # all_size=222 即所有节点数
+    mask = torch.zeros(seq_length, seq_length, device=device)   # 先把mask构造成222*222的全0矩阵
+
+    # get intra-scale mask 把同层邻居的mask位置设为1
+    inner_window = inner_size // 2  # inner_size是 某个点能attend到同层的多少个邻居 inner_window即为一半
+    for layer_idx in range(len(all_size)):
+        start = sum(all_size[:layer_idx])
+        for i in range(start, start + all_size[layer_idx]): # 对于0~222当中 第layer_idx层的那些索引值
+            left_side = max(i - inner_window, start)
+            right_side = min(i + inner_window + 1, start + all_size[layer_idx])
+            mask[i, left_side:right_side] = 1
+
+    # get inter-scale mask 把父子间连接的mask位置设为1
+    for layer_idx in range(1, len(all_size)):
+        start = sum(all_size[:layer_idx])
+        for i in range(start, start + all_size[layer_idx]):
+            left_side = (start - all_size[layer_idx - 1]) + (i - start) * window_size[layer_idx - 1]
+            if i == ( start + all_size[layer_idx] - 1):
+                right_side = start
+            else:
+                right_side = (start - all_size[layer_idx - 1]) + (i - start + 1) * window_size[layer_idx - 1]
+            mask[i, left_side:right_side] = 1
+            mask[left_side:right_side, i] = 1
+
+    return mask, all_size
 
 @load_file_decorator
 def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):

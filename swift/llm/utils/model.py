@@ -4477,19 +4477,6 @@ def get_model_tokenizer_deepseek2(model_dir: str,
     placeholder_tokens=['<IMG_CONTEXT>'],
     tags=['multi-modal', 'vision', 'video'],
     hf_model_id='OpenGVLab/InternVL2-Llama3-76B-AWQ')
-@register_model(
-    ModelType.hierar_internvl2,
-    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B',   # load 8B ckpt as init
-    LoRATM.internvl,
-    TemplateType.hierar_internvl2,
-    requires=['transformers>=4.36', 'timm'],
-    ignore_file_pattern=[r'.+\.zip$'],
-    support_flash_attn=True,
-    support_lmdeploy=True,
-    support_vllm=True,
-    placeholder_tokens=['<IMG_CONTEXT>'],
-    tags=['multi-modal', 'vision', 'video'],
-    hf_model_id='OpenGVLab/InternVL2-8B')
 def get_model_tokenizer_internvl(model_dir: str,
                                  torch_dtype: torch.dtype,
                                  model_kwargs: Dict[str, Any],
@@ -4537,6 +4524,31 @@ def get_model_tokenizer_internvl(model_dir: str,
         _use_submodel_func(model, 'language_model', func_list)
         embedding = model.language_model.get_input_embeddings()
         embedding.register_forward_hook(_clone_hook)
+
+    return model, tokenizer
+
+
+@register_model(
+    ModelType.hierar_internvl2,
+    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B',   # load 8B ckpt as init
+    LoRATM.internvl,
+    TemplateType.hierar_internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=True,
+    support_lmdeploy=True,
+    support_vllm=True,
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2-2B')
+def get_model_tokenizer_hierar_internvl(model_dir: str,
+                                        torch_dtype: torch.dtype,
+                                        model_kwargs: Dict[str, Any],
+                                        load_model: bool = True,
+                                        **kwargs):
+
+    model, tokenizer = get_model_tokenizer_internvl(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
+    # model.tree_conv.to('cuda') # 这里好像不能这样 会导致程序在后面失去对模型和数据cuda的协调
 
     return model, tokenizer
 

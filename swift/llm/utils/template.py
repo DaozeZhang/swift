@@ -27,7 +27,8 @@ from swift.torchacc_utils import pad_and_split_batch
 from swift.utils import get_dist_setting, get_logger, upper_bound, use_torchacc
 from .vision_utils import (load_audio_qwen, load_batch, load_image, load_video_cogvlm2, load_video_internvl,
                            load_video_llava, load_video_minicpmv_mplug_owl3, load_video_qwen2, rescale_image,
-                           transform_image)
+                           transform_image, get_hierar_mask)
+from ...hub.errors import NotSupportError
 
 logger = get_logger()
 
@@ -2585,18 +2586,18 @@ class HierarInternvl2Template(InternvlTemplate):
             import numpy as np
             img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False)
             img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
-            vis_sta = np.array(_findall(input_ids, img_sta_token_id)) + 1
-            vis_end = np.array(_findall(input_ids, img_end_token_id)) - 1   # 闭区间
+            vis_sta = torch.tensor(_findall(input_ids, img_sta_token_id)) + 1
+            vis_end = torch.tensor(_findall(input_ids, img_end_token_id)) - 1   # 闭区间
             assert all(vis_end - vis_sta + 1 == self.num_image_token)
 
             coaser_img_num = sum(inputs['level_sizes'][1:])
             img_end_pos = _findall(input_ids, img_end_token_id)[-1]  # the last </img>
 
             # </img> \n ...coaser_img...
-            coaser_sta = np.array([ i * self.num_image_token for i in range(coaser_img_num)]) + img_end_pos + 2
-            coaser_end = np.array([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + img_end_pos + 2    # 闭区间
-            inputs['vis_sta'], inputs['vis_end'] = vis_sta, vis_end
-            inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta, coaser_end
+            coaser_sta = torch.tensor([ i * self.num_image_token for i in range(coaser_img_num)]) + img_end_pos + 2
+            coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + img_end_pos + 2 # 闭区间
+            inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
+            inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
 
         return inputs, {}
 
@@ -2608,7 +2609,9 @@ class HierarInternvl2Template(InternvlTemplate):
         pixel_values = data['pixel_values']
         if pixel_values is not None:
             pixel_values = pixel_values.to(device=device)
-            vit_embeds = model.extract_feature(pixel_values).to(device=device)
+            vit_embeds = model.extract_feature(pixel_values).to(device=device)  #
+            if torch.any(torch.isnan(vit_embeds)):
+                raise NotSupportError('vit_embeds contain NaN.')
             selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
             # input_ids里 每一帧都形如<img> <IMG_CONTEXT>*256 </img> 找出<IMG_CONTEXT>位置替换为vit_embeds
             inputs_embeds[selected] = vit_embeds.reshape(-1, vit_embeds.shape[-1])
@@ -2622,14 +2625,42 @@ class HierarInternvl2Template(InternvlTemplate):
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         # 在enumerate(data_iterator)时会调用该函数 对获取到的batch进行处理 Template类的该函数只会保留默认的字段
+        # 调用完该函数后 pre_forward_hook会再调用一次该函数 这里框架不太优雅 此时就不用添加新字段了
         res = super().data_collator(batch, padding_to)
-        res['vis_sta'] = torch.tensor([b['vis_sta'] for b in batch])
-        res['vis_end'] = torch.tensor([b['vis_end'] for b in batch])
-        res['coaser_sta'] = torch.tensor([b['coaser_sta'] for b in batch])
-        res['coaser_end'] = torch.tensor([b['coaser_end'] for b in batch])
-        res['llm_use_coasers'] = torch.tensor([b['llm_use_coasers'] for b in batch])
-        
+        if 'vis_sta' not in batch[0].keys():
+            return res
+        res['vis_sta'] = torch.cat([b['vis_sta'] for b in batch], dim=0) # !!! b里面多了一个bsz=1维度! 上面的unsqueeze!
+        res['vis_end'] = torch.cat([b['vis_end'] for b in batch], dim=0)
+        res['coaser_sta'] = torch.cat([b['coaser_sta'] for b in batch], dim=0)
+        res['coaser_end'] = torch.cat([b['coaser_end'] for b in batch], dim=0)
+        res['llm_use_coasers'] = batch[0]['llm_use_coasers']
+
         # construct the attention_mask
+        input_ids = res['input_ids']
+        att_mask = [torch.ones((len(input_ids[i]), len(input_ids[i])), dtype=torch.int64)
+                    for i in range(input_ids.shape[0])]
+        if res['llm_use_coasers']:
+            ...
+        else:
+            first_coaser_sta = [b['coaser_sta'][0, 0] for b in batch]
+            last_coaser_end = [b['coaser_end'][0, -1] for b in batch]
+            for i in range(len(batch)):
+                att_mask[i][first_coaser_sta[i] : last_coaser_end[i] + 1, :] = 0
+                att_mask[i][:, first_coaser_sta[i] : last_coaser_end[i] + 1] = 0
+                ## set the blocks about videos
+                # first make all the video-video blocks as 0
+                v_sta = torch.cat([ res['vis_sta'][i, :], res['coaser_sta'][i, :] ])
+                v_end = torch.cat([ res['vis_end'][i, :], res['coaser_end'][i, :] ])
+                for x in range(len(v_sta)):
+                    for y in range(len(v_sta)):
+                        att_mask[i][v_sta[x]: v_end[x] + 1, v_sta[y]: v_end[y] + 1] = 0
+                # then set the valid video-video blocks as 1 according to the ref
+                ref_mask, level_sizes = get_hierar_mask(bottom_size=res['vis_sta'][i].shape[0], array_sizes=[2,2,2],
+                                                        neibor_size=3, device='cpu')
+                all_x, all_y = torch.where(ref_mask==1)
+                for x, y in zip(all_x, all_y):
+                    att_mask[i][ v_sta[x] : v_end[x] + 1, v_sta[y] : v_end[y] + 1 ] = 1
+            res['trsfm_att_mask'] = torch.stack(att_mask, dim=0)
 
         return res
 
