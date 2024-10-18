@@ -1,10 +1,17 @@
 import torch
+import torch.nn.functional as F
 
-tensor = torch.load('att_mask.tensor')
+
+logits = torch.tensor([
+    [1, 2, 3],
+    [6, 5, 4]
+]).float()
+
+res1 = F.gumbel_softmax(logits, tau=1, hard=False)
+
+res2 = F.gumbel_softmax(logits, tau=1, hard=True)
+
 ...
-
-
-
 
 
 
