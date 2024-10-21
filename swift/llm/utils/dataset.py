@@ -183,8 +183,8 @@ class DatasetName:
     # for video
     video_chatgpt = 'video-chatgpt'
     egoschema = 'egoschema'
-    # ego4d_video = 'ego4d-video'
     activitynetqa = 'activitynetqa'
+    llava_video_178k = 'llava-video-178k'
 
     # rlhf
     hh_rlhf = 'hh-rlhf'
@@ -939,22 +939,54 @@ register_dataset(
     tags=['chat', 'multi-modal', 'video'])
 
 
-# def _preprocess_ego4d_video(dataset: DATASET_TYPE) -> DATASET_TYPE:
-#     for i in range(1, 53):
-#         url = f'https://modelscope.cn/datasets/AI-ModelScope/ego4d-video/resolve/master/ego4d_video.z{i:02d}'
-#         local_dir = MediaCache.download(url, 'ego4d_video')
-#     ...
-#     # try except: this dataset does not support online downloading and extracting because its video files are not tar or zip format, please download it to...
-#     'zip -FF archive.zip --out fixed-archive.zip'
-#
-# register_dataset(
-#     DatasetName.ego4d_video,
-#     'AI-ModelScope/ego4d-video', None,
-#     _preprocess_ego4d_video,
-#     get_dataset_from_repo,
-#     split=['train'],
-#     hf_dataset_id='wofmanaf/ego4d-video',
-#     tags=['chat', 'multi-modal', 'video'])
+# def _preprocess_llava_video_178k(dataset: DATASET_TYPE) -> DATASET_TYPE:
+#     for i in range(1, 6):
+#         url = f'https://modelscope.cn/datasets/AI-ModelScope/egoschema/resolve/master/videos_chunked_0{i}.zip'
+#         local_dir = MediaCache.download(url, 'egoschema')
+
+#     local_dir = os.path.join(local_dir, 'videos')
+#     mp4_set = [file[:-4] for file in os.listdir(local_dir) if file.endswith('mp4')]
+
+#     def _process(d):
+#         transfer_to_option = {
+#             '0': 'A',
+#             '1': 'B',
+#             '2': 'C',
+#             '3': 'D',
+#             '4': 'E',
+#         }
+#         if d['video_idx'] not in mp4_set:
+#             return {'query': None, 'response': None, 'videos': None}
+#         return {
+#             'query': d['question'] + '\n' + str(d['option']),
+#             'response': transfer_to_option[d['answer']],
+#             'videos': [os.path.join(local_dir, f"{d['video_idx']}.mp4")],
+#         }
+
+#     return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.llava_video_178k,
+    'lmms-lab/LLaVA-Video-178K', [
+        '0_30_s_academic_v0_1', '0_30s_activitynet', '0_30s_nextqa', '0_30_s_perceptiontest', '0_30_s_youtube_vO_1',
+        '1_2_m_academic_vO_1', '1_2_m_activitynet', '1_2_m_nextqa', '1_2_m_youtube_vo_1', '2_3_m_ academic_vO_1',
+        '2_3_m_ activitynet', '2_3_m_nextqa', '2_3_m_youtube_vo_1', '30_60_s_academic_vO_1', '30_60_s_activitynet',
+        '30_60_5_nextqa', '30_60_s_perceptiontest', '30_60_s_youtube_vO_1'
+    ],
+    ConversationsPreprocessor(
+        user_role='human',
+        assistant_role='gpt',
+        conversations_key='conversations',
+        from_key='from',
+        value_key='value',
+        media_type='video',
+        media_key='video',
+        error_strategy='delete'),
+    get_dataset_from_repo,
+    split=['caption', 'open_ended', 'multi_choice'],
+    hf_dataset_id='lmms-lab/LLaVA-Video-178K',
+    tags=['chat', 'multi-modal', 'video'])
+
 
 def _preprocess_activitynetqa(dataset: DATASET_TYPE) -> DATASET_TYPE:
     for i in range(1, 29):
