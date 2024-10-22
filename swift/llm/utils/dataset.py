@@ -939,39 +939,70 @@ register_dataset(
     tags=['chat', 'multi-modal', 'video'])
 
 
-# def _preprocess_llava_video_178k(dataset: DATASET_TYPE) -> DATASET_TYPE:
-#     for i in range(1, 6):
-#         url = f'https://modelscope.cn/datasets/AI-ModelScope/egoschema/resolve/master/videos_chunked_0{i}.zip'
-#         local_dir = MediaCache.download(url, 'egoschema')
+def preprocess_llava_video_178k(dataset: DATASET_TYPE, subset, dataset_id) -> DATASET_TYPE:
+    
+    dataset_dir = '/mnt/workspace/.cache/modelscope/datasets'   # YOUR PATH TO `lmms-lab` directory
+    local_dir = f'{dataset_dir}/{dataset_id}/{subset}/'    
+    
+    if not os.path.exists(local_dir):
+        logger.error(f'The video files of this lmms-lab/LLaVA-Video-178K dataset are separately zipped, therefore you need to'
+            ' download the video files from HF or MS and extract the .tar.gz files. Then, please write the path to the'
+            ' `lmms-lab` directory (with extracted video files in lmms-lab/LLaVA-Video-178K) in the preprocess_llava_video_178k()'
+            ' in swift/llm/utils/dataset.py.')
 
-#     local_dir = os.path.join(local_dir, 'videos')
-#     mp4_set = [file[:-4] for file in os.listdir(local_dir) if file.endswith('mp4')]
+    def _process(d):    # after this process, the data will undergo _post_preprocess() of ConversationsPreprocessor
+        file_path = os.path.join(local_dir, f"{d['video']}")
+        if not os.path.exists(file_path):
+            return {'id': None, 'conversations': None, 'data_source': None, 'video': None}
+        return {
+            'id': d['id'],
+            'conversations': d['conversations'],
+            'data_source': d['data_source'],
+            'video': [file_path],
+        }
 
-#     def _process(d):
-#         transfer_to_option = {
-#             '0': 'A',
-#             '1': 'B',
-#             '2': 'C',
-#             '3': 'D',
-#             '4': 'E',
-#         }
-#         if d['video_idx'] not in mp4_set:
-#             return {'query': None, 'response': None, 'videos': None}
-#         return {
-#             'query': d['question'] + '\n' + str(d['option']),
-#             'response': transfer_to_option[d['answer']],
-#             'videos': [os.path.join(local_dir, f"{d['video_idx']}.mp4")],
-#         }
+    return dataset.map(_process).filter(lambda row: row['conversations'] is not None)
 
-#     return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+def get_llava_video_178k_dataset(dataset_id: str,
+                                 subsets: Optional[List[str]],
+                                 preprocess_func: PreprocessFunc,
+                                 split: List[str],
+                                 dataset_sample: int = -1,
+                                 *,
+                                 random_state: Optional[RandomState] = None,
+                                 dataset_test_ratio: float = 0.,
+                                 remove_useless_columns: bool = True,
+                                 use_hf: bool = False,
+                                 **kwargs) -> Tuple[HfDataset, Optional[HfDataset]]:
+    streaming = kwargs.get('streaming', False)
+    if subsets is None:
+        subsets = []
+    assert len(split) > 0
+    if len(subsets) == 0:
+        subset_split_list = split
+    else:
+        subset_split_list = list(itertools.product(subsets, split))
+    all_datasets = []
+    for subset in subset_split_list:
+        dataset = load_ms_dataset(dataset_id, [subset], use_hf, streaming=streaming)
+        dataset = preprocess_llava_video_178k(dataset, subset[0], dataset_id)
+        all_datasets.append(dataset)
+        break
+    if len(all_datasets) > 1:
+        dataset = concatenate_datasets(all_datasets) if not streaming else interleave_datasets(all_datasets)
+    else:
+        dataset = all_datasets[0]
+    return _post_preprocess(dataset, dataset_sample, random_state, preprocess_func, dataset_test_ratio,
+                            remove_useless_columns, **kwargs)
 
 register_dataset(
     DatasetName.llava_video_178k,
     'lmms-lab/LLaVA-Video-178K', [
-        '0_30_s_academic_v0_1', '0_30s_activitynet', '0_30s_nextqa', '0_30_s_perceptiontest', '0_30_s_youtube_vO_1',
-        '1_2_m_academic_vO_1', '1_2_m_activitynet', '1_2_m_nextqa', '1_2_m_youtube_vo_1', '2_3_m_ academic_vO_1',
-        '2_3_m_ activitynet', '2_3_m_nextqa', '2_3_m_youtube_vo_1', '30_60_s_academic_vO_1', '30_60_s_activitynet',
-        '30_60_5_nextqa', '30_60_s_perceptiontest', '30_60_s_youtube_vO_1'
+        '0_30_s_academic_v0_1', '0_30_s_youtube_v0_1',
+        '1_2_m_academic_v0_1', '1_2_m_youtube_v0_1', 
+        '2_3_m_academic_v0_1', '2_3_m_youtube_v0_1', 
+        '30_60_s_academic_v0_1', '30_60_s_youtube_v0_1',
     ],
     ConversationsPreprocessor(
         user_role='human',
@@ -982,7 +1013,7 @@ register_dataset(
         media_type='video',
         media_key='video',
         error_strategy='delete'),
-    get_dataset_from_repo,
+    get_llava_video_178k_dataset,
     split=['caption', 'open_ended', 'multi_choice'],
     hf_dataset_id='lmms-lab/LLaVA-Video-178K',
     tags=['chat', 'multi-modal', 'video'])
