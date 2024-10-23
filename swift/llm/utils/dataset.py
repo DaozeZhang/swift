@@ -186,6 +186,7 @@ class DatasetName:
     activitynetqa = 'activitynetqa'
     llava_video_178k = 'llava-video-178k'
     moviechat_1k_test = 'moviechat-1k-test'
+    moviechat_1k_train = 'moviechat-1k-train'
 
     # rlhf
     hh_rlhf = 'hh-rlhf'
@@ -1017,6 +1018,7 @@ register_dataset(
     get_llava_video_178k_dataset,
     split=['caption', 'open_ended', 'multi_choice'],
     hf_dataset_id='lmms-lab/LLaVA-Video-178K',
+    huge_dataset=True,
     tags=['chat', 'multi-modal', 'video'])
 
 
@@ -1069,6 +1071,47 @@ register_dataset(
     get_dataset_from_repo,
     split=['test'],
     hf_dataset_id='Enxin/MovieChat-1K-test',
+    tags=['chat', 'multi-modal', 'video'])
+
+
+def _preprocess_moviechat_1k_train(dataset: DATASET_TYPE) -> DATASET_TYPE:
+
+    local_dir = '/mnt/workspace/.cache/modelscope/datasets/AI-ModelScope/MovieChat-1K_train/' # YOUR PATH TO DIRECTORY
+    
+    if not os.path.exists(local_dir):
+        logger.error(f'The video files of this MovieChat-1K_train dataset are separately zipped, therefore you need to'
+            ' download the video files from HF or MS and extract the .tar files. Then, please write the path to the'
+            ' `MovieChat-1K_train` directory (with extracted video files in it) in the _preprocess_moviechat_1k_train()'
+            ' in swift/llm/utils/dataset.py.')
+
+    def _process(batch):    # bsz==1
+        file_path = os.path.join(local_dir, f"{batch['info'][0]['video_path']}")
+        if not os.path.exists(file_path):
+            return {"res": [{'query': None, 'response': None, 'video': None}]}
+        res = []
+        for qa in batch["global"][0]:
+            res.append( {
+                'query': qa['question'],
+                'response': qa['answer'],
+                'video': file_path,
+            } )
+        return {"res": res}
+
+    dict_list = dataset.map(_process, batched=True, batch_size=1, remove_columns=dataset.column_names)['res']
+    import pandas as pd
+    from modelscope import MsDataset
+    hf_dataset = HfDataset.from_pandas(pd.DataFrame(dict_list)).filter(lambda row: row['video'] is not None)
+    return hf_dataset
+    
+
+register_dataset(
+    DatasetName.moviechat_1k_train,
+    'AI-ModelScope/MovieChat-1K_train', None,
+    _preprocess_moviechat_1k_train,
+    get_dataset_from_repo,
+    split=['train'],
+    hf_dataset_id='Enxin/MovieChat-1K_train',
+    huge_dataset=True,
     tags=['chat', 'multi-modal', 'video'])
 
 
