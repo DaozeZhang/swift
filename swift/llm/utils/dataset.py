@@ -990,7 +990,6 @@ def get_llava_video_178k_dataset(dataset_id: str,
         dataset = load_ms_dataset(dataset_id, [subset], use_hf, streaming=streaming)
         dataset = preprocess_llava_video_178k(dataset, subset[0], dataset_id)
         all_datasets.append(dataset)
-        break
     if len(all_datasets) > 1:
         dataset = concatenate_datasets(all_datasets) if not streaming else interleave_datasets(all_datasets)
     else:
@@ -1001,10 +1000,10 @@ def get_llava_video_178k_dataset(dataset_id: str,
 register_dataset(
     DatasetName.llava_video_178k,
     'lmms-lab/LLaVA-Video-178K', [
-        '0_30_s_academic_v0_1', '0_30_s_youtube_v0_1',
+        # '0_30_s_academic_v0_1', '0_30_s_youtube_v0_1',
         '1_2_m_academic_v0_1', '1_2_m_youtube_v0_1', 
         '2_3_m_academic_v0_1', '2_3_m_youtube_v0_1', 
-        '30_60_s_academic_v0_1', '30_60_s_youtube_v0_1',
+        # '30_60_s_academic_v0_1', '30_60_s_youtube_v0_1',
     ],
     ConversationsPreprocessor(
         user_role='human',
@@ -1075,7 +1074,7 @@ register_dataset(
 
 
 def _preprocess_moviechat_1k_train(dataset: DATASET_TYPE) -> DATASET_TYPE:
-
+    # 这里下载好视频以后再写
     local_dir = '/mnt/workspace/.cache/modelscope/datasets/AI-ModelScope/MovieChat-1K_train/' # YOUR PATH TO DIRECTORY
     
     if not os.path.exists(local_dir):
@@ -1106,11 +1105,12 @@ def _preprocess_moviechat_1k_train(dataset: DATASET_TYPE) -> DATASET_TYPE:
 
 register_dataset(
     DatasetName.moviechat_1k_train,
-    'AI-ModelScope/MovieChat-1K_train', None,
+    # 'AI-ModelScope/MovieChat-1K_train_filtered', 
+    '/mnt/nas1/daoze/repo/MovieChat-1K_train_filtered/',
+    None,
     _preprocess_moviechat_1k_train,
     get_dataset_from_repo,
     split=['train'],
-    hf_dataset_id='Enxin/MovieChat-1K_train',
     huge_dataset=True,
     tags=['chat', 'multi-modal', 'video'])
 
