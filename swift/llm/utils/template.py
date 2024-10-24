@@ -2599,6 +2599,8 @@ class HierarInternvl2Template(InternvlTemplate):
             inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
             inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
 
+        if inputs['labels'] is None: 
+            ...
         return inputs, {}
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:
@@ -2617,10 +2619,6 @@ class HierarInternvl2Template(InternvlTemplate):
             inputs_embeds[selected] = vit_embeds.reshape(-1, vit_embeds.shape[-1])
         else:
             raise DatasetNotFoundError('No pixel values.')
-        # elif is_deepspeed_enabled():
-        #     dummy_pixel_values = torch.zeros((1, 3, 32, 32), device=device, dtype=inputs_embeds.dtype)
-        #     vit_embeds = model.extract_feature(dummy_pixel_values).to(device=device)
-        #     inputs_embeds += vit_embeds.mean() * 0.
         return {'inputs_embeds': inputs_embeds}
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
