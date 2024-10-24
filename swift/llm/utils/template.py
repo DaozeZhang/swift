@@ -1024,7 +1024,13 @@ class Template:
 
         for key in ['labels', 'loss_scale', 'position_ids']:
             if key in batch[0]:
-                res[key] = [torch.tensor(b[key]) for b in batch]
+                tmp = []
+                for b in batch:
+                    if b[key] is None: 
+                        logger.error(f'The value of `{key}` field contains None, which will lead to an error in the code below.'
+                                     f' The input_ids of this data:\n{b['input_ids']}')
+                    tmp.append(torch.tensor(b[key]))
+                res[key] = tmp
 
         if padding_to is not None:
             assert 'input_ids' in res
