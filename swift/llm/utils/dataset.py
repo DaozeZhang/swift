@@ -994,8 +994,10 @@ def get_llava_video_178k_dataset(dataset_id: str,
         dataset = concatenate_datasets(all_datasets) if not streaming else interleave_datasets(all_datasets)
     else:
         dataset = all_datasets[0]
-    return _post_preprocess(dataset, dataset_sample, random_state, preprocess_func, dataset_test_ratio,
-                            remove_useless_columns, **kwargs)
+    post_datasets = _post_preprocess(dataset, dataset_sample, random_state, preprocess_func, dataset_test_ratio,
+                                     remove_useless_columns, **kwargs)    # include <image> -> <video>
+    return post_datasets
+
 
 register_dataset(
     DatasetName.llava_video_178k,

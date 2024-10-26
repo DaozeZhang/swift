@@ -1028,7 +1028,7 @@ class Template:
                 for b in batch:
                     if b[key] is None: 
                         logger.error(f'The value of `{key}` field contains None, which will lead to an error in the code below.'
-                                     f' The input_ids of this data:\n{b['input_ids']}')
+                                     f' The input_ids of this data:\n{b["input_ids"]}')
                     tmp.append(torch.tensor(b[key]))
                 res[key] = tmp
 
@@ -2508,8 +2508,8 @@ class HierarInternvl2Template(InternvlTemplate):
         img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
         img_end_pos = _findall(input_ids, img_end_token_id)[-1] # the last </img>
 
-        llm_use_coasers = False
-        if llm_use_coasers:
+        hierar_mode = 'llm_not_use_coasers'
+        if hierar_mode == 'llm_use_coasers':
             i, cur_level_num = 0, nframes // 2
             level_sizes = [nframes]
             res: List[int] = self.tokenizer.encode(f'The aggregate visual tokens of different levels of these '
@@ -2525,7 +2525,7 @@ class HierarInternvl2Template(InternvlTemplate):
                 i += 1
                 level_sizes.append(cur_level_num)
                 cur_level_num = cur_level_num // 2
-        else:
+        elif hierar_mode == 'llm_not_use_coasers':
             i, cur_level_num = 0, nframes // 2
             level_sizes = [nframes]
             res = []
@@ -2545,21 +2545,33 @@ class HierarInternvl2Template(InternvlTemplate):
 
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
-        inputs['llm_use_coasers'] = llm_use_coasers
+        inputs['hierar_mode'] = hierar_mode
         inputs['level_sizes'] = level_sizes
         return inputs
 
     def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        inputs, _ = super(InternvlTemplate, self)._encode(example)
-        inputs = self.insert_coaser_img(inputs, len(example.get('images')))
+        inputs, _ = super(InternvlTemplate, self)._encode(example)  # eval时example变成<image>*8 intrenvl2怎么做的呢
+        try:
+            input_ids = inputs['input_ids']
+        except Exception as e:
+            log.error('KeyError: `input_ids` not found.')
+
+        input_img_num = len(example.get('images'))
+        has_img_vid_token = input_img_num != 0
+        if has_img_vid_token:
+            inputs = self.insert_coaser_img(inputs, input_img_num)
+        else:
+            inputs['hierar_mode'], inputs['level_sizes'] = 'pure_text_input', None
+
         if len(inputs) == 0:
             return inputs, {}
         input_ids = inputs['input_ids']
-        idx_list = _findall(input_ids, -100)
+        idx_list = _findall(input_ids, -100)    # Template的_encode会把帧的位置设为-100
         labels = inputs.get('labels')
         images = example.get('images')
         if images:
-            has_video = bool(example.get('videos'))
+            # has_video = bool(example.get('videos')) # 在eval时可能并没有video字段 此时max_num=12 将把每帧转为9个patch 下面num_patch=9
+            has_video = True                          # 目前只做视频的实验 has_video直接置True
             input_size = get_env_args('input_size', int, 448)
             max_num = get_env_args('max_num', int, 1 if has_video else 12)
             pixel_values = [transform_image(image, input_size, max_num) for image in images]
@@ -2574,21 +2586,23 @@ class HierarInternvl2Template(InternvlTemplate):
         for idx, num_patch in zip(idx_list, num_patches):
             img_tokens: List[int] = self.tokenizer.encode(
                 '<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * num_patch
-            # 把idx位置的<> 替换为256个<IMG_CONTEXT>
+            # 把idx位置的-100 替换为256个<IMG_CONTEXT>
             input_ids = input_ids[:idx + added_tokens_len] + img_tokens + input_ids[idx + added_tokens_len + 1:]
             if labels is not None:
                 labels = labels[:idx + added_tokens_len] + [-100] * len(img_tokens) + labels[idx + added_tokens_len
                                                                                              + 1:]
-            added_tokens_len += len(img_tokens) - 1     # 255
+            added_tokens_len += len(img_tokens) - 1     # 255 
         # ...context... Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img> ...context...
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
         inputs['_data'] = {'input_ids': torch.tensor(input_ids), 'pixel_values': pixel_values}
         inputs.pop('loss_scale', None)
 
-        if inputs['llm_use_coasers']:
+        if inputs['hierar_mode'] == 'pure_text_input':
+            inputs['vis_sta'], inputs['vis_end'], inputs['coaser_sta'], inputs['coaser_end'] = -1, -1, -1, -1
+        if inputs['hierar_mode'] == 'llm_use_coasers':
             ...
-        else:
+        elif inputs['hierar_mode'] == 'llm_not_use_coasers':
             import numpy as np
             img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False)
             img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
@@ -2604,9 +2618,12 @@ class HierarInternvl2Template(InternvlTemplate):
             coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + img_end_pos + 2 # 闭区间
             inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
             inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
+        
+        inputs['input_ids_bak'] = torch.tensor(input_ids).unsqueeze(0)
 
         if inputs['labels'] is None: 
-            ...
+            logger.error(f'The value of `labels` is None (ignore this error if you are inferring rather than training).'
+                         f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
         return inputs, {}
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:
@@ -2623,8 +2640,10 @@ class HierarInternvl2Template(InternvlTemplate):
             selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
             # input_ids里 每一帧都形如<img> <IMG_CONTEXT>*256 </img> 找出<IMG_CONTEXT>位置替换为vit_embeds
             inputs_embeds[selected] = vit_embeds.reshape(-1, vit_embeds.shape[-1])
-        else:
-            raise DatasetNotFoundError('No pixel values.')
+        elif is_deepspeed_enabled():
+            dummy_pixel_values = torch.zeros((1, 3, 32, 32), device=device, dtype=inputs_embeds.dtype)
+            vit_embeds = model.extract_feature(dummy_pixel_values).to(device=device)
+            inputs_embeds += vit_embeds.mean() * 0.
         return {'inputs_embeds': inputs_embeds}
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
@@ -2633,19 +2652,19 @@ class HierarInternvl2Template(InternvlTemplate):
         res = super().data_collator(batch, padding_to)
         if 'vis_sta' not in batch[0].keys():
             return res
-        res['vis_sta'] = torch.cat([b['vis_sta'] for b in batch], dim=0) # !!! b里面多了一个bsz=1维度! 上面的unsqueeze!
+        res['vis_sta'] = torch.cat([b['vis_sta'] for b in batch], dim=0) # b里面多了一个bsz=1维度! 上面的unsqueeze!
         res['vis_end'] = torch.cat([b['vis_end'] for b in batch], dim=0)
         res['coaser_sta'] = torch.cat([b['coaser_sta'] for b in batch], dim=0)
         res['coaser_end'] = torch.cat([b['coaser_end'] for b in batch], dim=0)
-        res['llm_use_coasers'] = batch[0]['llm_use_coasers']
-
+        res['hierar_mode'] = batch[0]['hierar_mode']
+        res['input_ids_bak'] = [b['input_ids_bak'] for b in batch]      # bsz>1则可能无法concat
         # construct the attention_mask
         input_ids = res['input_ids']
         att_mask = [torch.ones((len(input_ids[i]), len(input_ids[i])), dtype=torch.int64)
                     for i in range(input_ids.shape[0])]
-        if res['llm_use_coasers']:
+        if res['hierar_mode'] == 'llm_use_coasers':
             ...
-        else:
+        elif res['hierar_mode'] == 'llm_not_use_coasers':
             first_coaser_sta = [b['coaser_sta'][0, 0] for b in batch]
             last_coaser_end = [b['coaser_end'][0, -1] for b in batch]
             for i in range(len(batch)):
