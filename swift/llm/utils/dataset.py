@@ -663,7 +663,7 @@ def get_mantis_dataset(dataset_id: str,
         dataset = load_ms_dataset(dataset_id, [subset], use_hf, streaming=streaming)
         dataset = preprocess_mantis_image(dataset, subset=subset[0])
         all_datasets.append(dataset)
-        break
+
     if len(all_datasets) > 1:
         dataset = concatenate_datasets(all_datasets) if not streaming else interleave_datasets(all_datasets)
     else:

@@ -22,6 +22,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import is_torch_bf16_gpu_available, strtobool
 from transformers.utils.versions import require_version
+from trl import AutoModelForCausalLMWithValueHead
 
 from swift import get_logger
 from swift.utils import get_dist_setting, safe_ddp_context, subprocess_run, use_torchacc
@@ -261,6 +262,8 @@ class ModelType:
     llama3_1_405b_instruct_awq = 'llama3_1-405b-instruct-awq'
     llama3_1_405b_instruct_gptq_int4 = 'llama3_1-405b-instruct-gptq-int4'
     llama3_1_405b_instruct_bnb = 'llama3_1-405b-instruct-bnb'
+    # llama3.1-nemotron
+    llama3_1_nemotron_70B_instruct_hf = 'llama-3.1-nemotron-70B-instruct-hf'
     # llama3.2
     llama3_2_1b = 'llama3_2-1b'
     llama3_2_1b_instruct = 'llama3_2-1b-instruct'
@@ -441,6 +444,7 @@ class ModelType:
     # numina-math
     numina_math_7b = 'numina-math-7b'
     # deepseek-vl
+    deepseek_janus_1_3b = 'deepseek-janus-1_3b'
     deepseek_vl_1_3b_chat = 'deepseek-vl-1_3b-chat'
     deepseek_vl_7b_chat = 'deepseek-vl-7b-chat'
     # deepseek-v2
@@ -461,6 +465,8 @@ class ModelType:
     gemma2_2b_instruct = 'gemma2-2b-instruct'
     gemma2_9b_instruct = 'gemma2-9b-instruct'
     gemma2_27b_instruct = 'gemma2-27b-instruct'
+
+    ovis1_6_gemma2_9b = 'ovis1_6-gemma2-9b'
     # paligemma
     paligemma_3b_pt_224 = 'paligemma-3b-pt-224'
     paligemma_3b_pt_448 = 'paligemma-3b-pt-448'
@@ -523,6 +529,8 @@ class ModelType:
     # owl
     mplug_owl2_chat = 'mplug-owl2-chat'  # llama
     mplug_owl2_1_chat = 'mplug-owl2_1-chat'  # qwen
+    mplug_owl3_1b_chat = 'mplug-owl3-1b-chat'
+    mplug_owl3_2b_chat = 'mplug-owl3-2b-chat'
     mplug_owl3_7b_chat = 'mplug-owl3-7b-chat'
     # yuan
     yuan2_2b_instruct = 'yuan2-2b-instruct'
@@ -590,6 +598,13 @@ class ModelType:
     cogvlm2_video_13b_chat = 'cogvlm2-video-13b-chat'
     cogagent_18b_chat = 'cogagent-18b-chat'
     cogagent_18b_instruct = 'cogagent-18b-instruct'
+    # molmo
+    molmoe_1b = 'molmoe-1b'
+    molmo_7b_o = 'molmo-7b-o'
+    molmo_7b_d = 'molmo-7b-d'
+    molmo_72b = 'molmo-72b'
+    # emu3-chat
+    emu3_chat = 'emu3-chat'
     # mamba
     mamba_130m = 'mamba-130m'
     mamba_370m = 'mamba-370m'
@@ -602,6 +617,7 @@ class ModelType:
     telechat_12b = 'telechat-12b'
     telechat_12b_v2 = 'telechat-12b-v2'
     telechat_12b_v2_gptq_int4 = 'telechat-12b-v2-gptq-int4'
+    telechat2_115b = 'telechat2-115b'
     # grok-1
     grok_1 = 'grok-1'
     # dbrx
@@ -654,6 +670,10 @@ class LoRATM(NamedTuple):
     llama3_1_omni = 'llama3_1_omni'
     got_ocr2 = 'got_ocr2'
     llama3_2_vision = 'llama3_2_vision'
+    ovis1_6 = 'ovis1_6'
+    molmo = 'molmo'
+    deepseek_janus = 'deepseek_janus'
+    emu3_chat = 'emu3_chat'
     # default lora target modules for nlp llms.
     minicpm3 = ['q_a_proj', 'q_b_proj', 'kv_a_proj_with_mqa', 'kv_b_proj']
     baichuan = ['W_pack']
@@ -933,6 +953,14 @@ def _check_gptq_model(bits: int, model_config, model_kwargs: Dict[str, Any]) -> 
     support_vllm=True,
     support_flash_attn=True,
     hf_model_id='CohereForAI/c4ai-command-r-plus')
+@register_model(
+    ModelType.telechat2_115b,
+    'TeleAI/TeleChat2-115B',
+    LoRATM.telechat,
+    TemplateType.telechat2,
+    torch_dtype=torch.float16,
+    support_flash_attn=True,
+    hf_model_id='Tele-AI/TeleChat2-115B')
 def get_model_tokenizer_from_repo(model_dir: str,
                                   torch_dtype: Optional[torch.dtype],
                                   model_kwargs: Dict[str, Any],
@@ -1259,6 +1287,177 @@ def get_model_tokenizer_cogagent(model_dir: str,
     model, tokenizer = get_model_tokenizer_from_repo(
         model_dir, torch_dtype, model_kwargs, load_model, tokenizer=tokenizer, **kwargs)
     logger.info('Please ignore the unimported warning.')
+    return model, tokenizer
+
+
+@register_model(
+    ModelType.molmoe_1b,
+    'LLM-Research/MolmoE-1B-0924',
+    LoRATM.molmo,
+    TemplateType.molmo,
+    support_flash_attn=True,
+    support_vllm=False,
+    support_lmdeploy=False,
+    support_gradient_checkpointing=False,
+    eos_token='<|endoftext|>',
+    requires=['transformers>=4.45.0'],
+    placeholder_tokens=['<|image|>'],
+    torch_dtype=torch.float32,
+    tags=['multi-modal', 'vision'],
+    hf_model_id='allenai/MolmoE-1B-0924')
+def get_model_tokenizer_molmoe_1b(model_dir: str,
+                                  torch_dtype: torch.dtype,
+                                  model_kwargs: Dict[str, Any],
+                                  load_model: bool = True,
+                                  **kwargs):
+    from transformers import AutoProcessor
+    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+    model, tokenizer = get_model_tokenizer_from_repo(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
+    tokenizer.processor = processor
+
+    # fix bug for molmoe-1b
+    def to_dict(self, *args, **kwargs):
+        res = self._to_dict(*args, **kwargs)
+        res['vision_backbone'] = self.vision_backbone.__dict__
+        res.pop('to_dict')
+        res.pop('_to_dict')
+        return res
+
+    model.config._to_dict = model.config.to_dict
+    model.config.to_dict = MethodType(to_dict, model.config)
+    from transformers import GenerationMixin
+    model.generate = MethodType(GenerationMixin.generate, model)
+
+    if model and hasattr(model, '_old_forward'):  # device_map
+        device = model.lm_head.weight.device
+        forward_origin = model._old_forward
+
+        def _forward(*args, **kwargs):
+            if 'append_last_valid_logits' in kwargs:
+                kwargs['append_last_valid_logits'] = kwargs['append_last_valid_logits'].to(device)
+            return forward_origin(*args, **kwargs)
+
+        model._old_forward = _forward
+        model.forward_origin = forward_origin
+
+    return model, tokenizer
+
+
+@register_model(
+    ModelType.molmo_7b_o,
+    'LLM-Research/Molmo-7B-O-0924',
+    LoRATM.molmo,
+    TemplateType.molmo,
+    support_flash_attn=True,
+    support_vllm=False,
+    support_lmdeploy=False,
+    support_gradient_checkpointing=False,
+    eos_token='<|endoftext|>',
+    requires=['transformers>=4.45.0'],
+    placeholder_tokens=['<|image|>'],
+    tags=['multi-modal', 'vision'],
+    hf_model_id='allenai/Molmo-7B-O-0924')
+@register_model(
+    ModelType.molmo_7b_d,
+    'LLM-Research/Molmo-7B-D-0924',
+    LoRATM.molmo,
+    TemplateType.molmo,
+    support_flash_attn=True,
+    support_vllm=False,
+    support_lmdeploy=False,
+    support_gradient_checkpointing=False,
+    eos_token='<|endoftext|>',
+    requires=['transformers>=4.45.0'],
+    placeholder_tokens=['<|image|>'],
+    tags=['multi-modal', 'vision'],
+    hf_model_id='allenai/Molmo-7B-D-0924')
+@register_model(
+    ModelType.molmo_72b,
+    'LLM-Research/Molmo-72B-0924',
+    LoRATM.molmo,
+    TemplateType.molmo,
+    support_flash_attn=True,
+    support_vllm=False,
+    support_lmdeploy=False,
+    support_gradient_checkpointing=False,
+    eos_token='<|endoftext|>',
+    requires=['transformers>=4.45.0'],
+    placeholder_tokens=['<|image|>'],
+    tags=['multi-modal', 'vision'],
+    hf_model_id='allenai/Molmo-72B-0924')
+def get_model_tokenizer_molmo(model_dir: str,
+                              torch_dtype: torch.dtype,
+                              model_kwargs: Dict[str, Any],
+                              load_model: bool = True,
+                              **kwargs):
+    from transformers import AutoProcessor
+    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+    model_cls = get_class_from_dynamic_module('modeling_molmo.MolmoForCausalLM', model_dir)
+    model_cls._no_split_modules = ['MolmoSequentialBlock']
+    model, tokenizer = get_model_tokenizer_from_repo(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
+    tokenizer.processor = processor
+    if model:
+        device = next(model.model.transformer.ff_out.parameters()).device
+        forward_origin = model.model.forward
+
+        def _forward(*args, **kwargs):
+            if 'append_last_valid_logits' in kwargs:
+                kwargs['append_last_valid_logits'] = kwargs['append_last_valid_logits'].to(device)
+            return forward_origin(*args, **kwargs)
+
+        model.model.forward = _forward
+        model.model.forward_origin = forward_origin
+
+    return model, tokenizer
+
+
+@register_model(
+    ModelType.emu3_chat,
+    'BAAI/Emu3-Chat',
+    LoRATM.emu3_chat,
+    TemplateType.emu3_chat,
+    support_flash_attn=True,
+    support_gradient_checkpointing=True,
+    eos_token='<|extra_204|>',
+    requires=['transformers>=4.44.0'],
+    tags=['multi-modal', 'vision'],
+    hf_model_id='BAAI/Emu3-Chat')
+def get_model_tokenizer_emu3_chat(model_dir: str,
+                                  torch_dtype: torch.dtype,
+                                  model_kwargs: Dict[str, Any],
+                                  load_model: bool = True,
+                                  **kwargs):
+    model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    # flash attention
+    use_flash_attn = kwargs.pop('use_flash_attn', False)
+    if use_flash_attn:
+        model_config._attn_implementation = 'flash_attention_2'
+    elif use_flash_attn is False:
+        model_config._attn_implementation = 'eager'
+    model, tokenizer = get_model_tokenizer_from_repo(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
+
+    # download and load vision tokenizer
+    from transformers import AutoImageProcessor
+    use_hf = strtobool(os.environ.get('USE_HF', 'False'))
+    if use_hf:
+        from huggingface_hub import snapshot_download as hf_snapshot_download
+        vq_model = hf_snapshot_download('BAAI/Emu3-VisionTokenizer')
+    else:
+        vq_model = snapshot_download('BAAI/Emu3-VisionTokenizer')
+    image_processor = AutoImageProcessor.from_pretrained(vq_model, trust_remote_code=True)
+    image_tokenizer = AutoModel.from_pretrained(vq_model, device_map=model_kwargs['device_map'], trust_remote_code=True)
+    image_tokenizer.requires_grad_(False)
+
+    # load processor
+    if 'local_repo_path' in kwargs:
+        local_repo_path = kwargs['local_repo_path']
+    else:
+        local_repo_path = git_clone_github('https://github.com/baaivision/Emu3.git')
+    sys.path.append(os.path.join(local_repo_path))
+    from emu3.mllm.processing_emu3 import Emu3Processor
+    processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
+    tokenizer.processor = processor
+
     return model, tokenizer
 
 
@@ -2740,6 +2939,60 @@ def get_model_tokenizer_with_flash_attn(model_dir: str,
 
 
 @register_model(
+    ModelType.ovis1_6_gemma2_9b,
+    'AIDC-AI/Ovis1.6-Gemma2-9B',
+    LoRATM.ovis1_6,
+    TemplateType.ovis1_6,
+    requires=['transformers>=4.42'],
+    support_flash_attn=True,
+    tags=['multi-modal', 'vision'],
+    hf_model_id='AIDC-AI/Ovis1.6-Gemma2-9B')
+def get_model_tokenizer_ovis(*args, **kwargs):
+    model, tokenizer = get_model_tokenizer_with_flash_attn(*args, **kwargs)
+    if model is not None:
+        model.generation_config.cache_implementation = None
+        func_list = ['generate', 'forward', 'get_input_embeddings']
+        _use_submodel_func(model, 'llm', func_list)
+        embedding = model.get_input_embeddings()
+        embedding.register_forward_hook(_clone_hook)
+        model.config.keys_to_ignore_at_inference = ['past_key_values']  # fix prediction_step
+    try:
+        # fix device_map
+        from transformers.cache_utils import HybridCache
+
+        def update(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int, *args,
+                   **kwargs) -> Tuple[torch.Tensor]:
+            self.key_cache[layer_idx] = self.key_cache[layer_idx].to(key_states.device)
+            self.value_cache[layer_idx] = self.value_cache[layer_idx].to(value_states.device)
+            return self._update_origin(key_states, value_states, layer_idx, *args, **kwargs)
+
+        if not hasattr(HybridCache, '_update_origin'):
+            HybridCache._update_origin = HybridCache.update
+            HybridCache.update = update
+    except ImportError:
+        pass
+    return model, tokenizer
+
+
+@register_model(
+    ModelType.mplug_owl3_1b_chat,
+    'iic/mPLUG-Owl3-1B-241014',
+    LoRATM.mplug_owl3,
+    TemplateType.mplug_owl3,
+    requires=['transformers>=4.36', 'icecream'],  # decord
+    support_flash_attn=True,
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='mPLUG/mPLUG-Owl3-1B-241014')
+@register_model(
+    ModelType.mplug_owl3_2b_chat,
+    'iic/mPLUG-Owl3-2B-241014',
+    LoRATM.mplug_owl3,
+    TemplateType.mplug_owl3,
+    requires=['transformers>=4.36', 'icecream'],  # decord
+    support_flash_attn=True,
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='mPLUG/mPLUG-Owl3-2B-241014')
+@register_model(
     ModelType.mplug_owl3_7b_chat,
     'iic/mPLUG-Owl3-7B-240728',
     LoRATM.mplug_owl3,
@@ -2756,8 +3009,9 @@ def get_model_tokenizer_mplug_owl3(model_dir: str,
     model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
     processor = model.init_processor(tokenizer)
     tokenizer.processor = processor
-    func_list = ['generate', 'forward']
-    _use_submodel_func(model, 'language_model', func_list)
+    if model is not None:
+        func_list = ['generate', 'forward']
+        _use_submodel_func(model, 'language_model', func_list)
     return model, tokenizer
 
 
@@ -2952,8 +3206,9 @@ def get_model_tokenizer_florence(model_dir: str,
             model_dir, torch_dtype, model_kwargs, load_model, tokenizer=processor.tokenizer, **kwargs)
 
     tokenizer.processor = processor
-    # model.vision_tower.enable_checkpoint = True
-    _use_submodel_func(model, 'language_model', ['generate', 'forward'])
+    if model is not None:
+        model.vision_tower.enable_checkpoint = True
+        _use_submodel_func(model, 'language_model', ['generate', 'forward'])
     return model, tokenizer
 
 
@@ -3630,7 +3885,8 @@ def get_model_tokenizer_qwen2_audio(model_dir: str,
                                     **kwargs):
     from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
     processor = AutoProcessor.from_pretrained(model_dir)
-    kwargs['automodel_class'] = Qwen2AudioForConditionalGeneration
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = Qwen2AudioForConditionalGeneration
     model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
     tokenizer.processor = processor
     return model, tokenizer
@@ -3660,7 +3916,8 @@ def get_model_tokenizer_qwen2_vl(model_dir: str,
 
     from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
     processor = AutoProcessor.from_pretrained(model_dir)
-    kwargs['automodel_class'] = Qwen2VLForConditionalGeneration
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = Qwen2VLForConditionalGeneration
     model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
     tokenizer.processor = processor
     if model is not None:
@@ -4689,6 +4946,37 @@ def _use_submodel_func(model, submodel_name: str, func_list: List[str]) -> None:
 
 
 @register_model(
+    ModelType.deepseek_janus_1_3b,
+    'deepseek-ai/Janus-1.3B',
+    LoRATM.deepseek_janus,
+    TemplateType.deepseek_janus,
+    support_flash_attn=True,
+    tags=['multi-modal', 'vision'],
+    placeholder_tokens=['<image_placeholder>'],
+    hf_model_id='deepseek-ai/Janus-1.3B')
+def get_model_tokenizer_deepseek_janus(model_dir: str, *args, **kwargs):
+    if 'local_repo_path' in kwargs:
+        local_repo_path = kwargs['local_repo_path']
+    else:
+        local_repo_path = git_clone_github('https://github.com/deepseek-ai/Janus')
+    sys.path.append(os.path.join(local_repo_path))
+    from janus.models import MultiModalityCausalLM, VLChatProcessor
+    from janus.utils.io import load_pil_images
+
+    processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_dir)
+    tokenizer = processor.tokenizer
+    model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, *args, tokenizer=tokenizer, **kwargs)
+    tokenizer.processor = processor
+    if model:
+        model.language_model.model.embed_tokens.register_forward_hook(_clone_hook)
+        model.language_model.model.embed_tokens.register_forward_hook(_output_device_map_hook)
+        func_list = ['generate', 'get_input_embeddings', 'forward', 'gradient_checkpointing_enable']
+        _use_submodel_func(model, 'language_model', func_list)
+        model.generation_config = model.language_model.generation_config
+    return model, tokenizer
+
+
+@register_model(
     ModelType.deepseek_vl_7b_chat,
     'deepseek-ai/deepseek-vl-7b-chat',
     LoRATM.deepseek_vl,
@@ -4747,6 +5035,17 @@ def get_model_tokenizer_deepseek_vl(model_dir: str,
     return model, tokenizer
 
 
+@register_model(
+    ModelType.llama3_1_nemotron_70B_instruct_hf,
+    'AI-ModelScope/Llama-3.1-Nemotron-70B-Instruct-HF',
+    LoRATM.llama,
+    TemplateType.llama3,
+    support_flash_attn=True,
+    support_vllm=True,
+    support_lmdeploy=True,
+    requires=['transformers>=4.43'],
+    ignore_file_pattern=[r'.+\.pth$'],
+    hf_model_id='nvidia/Llama-3.1-Nemotron-70B-Instruct-HF')
 @register_model(
     ModelType.openbuddy_llama3_1_8b_chat,
     'OpenBuddy/openbuddy-llama3.1-8b-v22.1-131k',
@@ -5857,7 +6156,7 @@ def get_model_tokenizer_codellama(model_dir: str,
     ModelType.telechat_12b_v2,
     'TeleAI/TeleChat-12B-v2',
     LoRATM.telechat,
-    TemplateType.telechat_v2,
+    TemplateType.telechat,
     eos_token=2,
     support_flash_attn=True,
     hf_model_id='Tele-AI/TeleChat-12B-v2')
@@ -5865,9 +6164,10 @@ def get_model_tokenizer_codellama(model_dir: str,
     ModelType.telechat_12b_v2_gptq_int4,
     'swift/TeleChat-12B-V2-GPTQ-Int4',
     LoRATM.telechat,
-    TemplateType.telechat_v2,
+    TemplateType.telechat,
     eos_token=2,
     requires=['auto_gptq>=0.5'],
+    torch_dtype=torch.float16,
     support_flash_attn=True,
     function_kwargs={'gptq_bits': 4})
 def get_model_tokenizer_phi(model_dir: str,
@@ -6272,7 +6572,8 @@ def get_model_tokenizer_llava_hf(model_dir: str, *args, **kwargs):
     hf_model_id='meta-llama/Llama-3.2-90B-Vision-Instruct')
 def get_model_tokenizer_llama3_2_vision(*args, **kwargs):
     from transformers import MllamaForConditionalGeneration
-    kwargs['automodel_class'] = MllamaForConditionalGeneration
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = MllamaForConditionalGeneration
     return get_model_tokenizer_llava_hf(*args, **kwargs)
 
 
@@ -6338,7 +6639,8 @@ def get_model_tokenizer_llava_1_5(*args, **kwargs):
     hf_model_id='llava-hf/llava-onevision-qwen2-72b-ov-hf')
 def get_model_tokenizer_llava_onevision(*args, **kwargs):
     from transformers import LlavaOnevisionForConditionalGeneration
-    kwargs['automodel_class'] = LlavaOnevisionForConditionalGeneration
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = LlavaOnevisionForConditionalGeneration
     return get_model_tokenizer_llava_hf(*args, **kwargs)
 
 
@@ -6468,7 +6770,8 @@ def get_model_tokenizer_llava_next_yi(*args, **kwargs):
     hf_model_id='llava-hf/LLaVA-NeXT-Video-7B-hf')
 def get_model_tokenizer_llava_next_video(*args, **kwargs):
     from transformers import LlavaNextVideoForConditionalGeneration
-    kwargs['automodel_class'] = LlavaNextVideoForConditionalGeneration
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = LlavaNextVideoForConditionalGeneration
     return get_model_tokenizer_llava_hf(*args, **kwargs)
 
 
@@ -6591,7 +6894,8 @@ def get_model_tokenizer_llava(model_dir: str,
 def get_model_tokenizer_idefics(model_dir: str, *args, **kwargs):
     from transformers import AutoProcessor, AutoModelForVision2Seq
     processor = AutoProcessor.from_pretrained(model_dir)
-    kwargs['automodel_class'] = AutoModelForVision2Seq
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = AutoModelForVision2Seq
     model, tokenizer = get_model_tokenizer_with_flash_attn(model_dir, *args, **kwargs)
     tokenizer.processor = processor
     return model, tokenizer
@@ -6677,7 +6981,8 @@ def get_model_tokenizer_omnli(model_dir: str,
     model_config.speech_encoder = os.path.join(model_dir, 'large-v3.pt')
     if not os.path.exists(model_config.speech_encoder):
         whisper.load_model('large-v3', download_root=model_dir)
-    kwargs['automodel_class'] = OmniSpeech2SLlamaForCausalLM
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = OmniSpeech2SLlamaForCausalLM
     kwargs['model_config'] = model_config
     for key in ['forward', 'generate']:
         try:
@@ -6705,7 +7010,8 @@ def get_model_tokenizer_omnli(model_dir: str,
     tags=['multi-modal', 'audio'],
     hf_model_id='stepfun-ai/GOT-OCR2_0')
 def get_model_tokenizer_got_ocr2(*args, **kwargs):
-    kwargs['automodel_class'] = AutoModel
+    if 'automodel_class' not in kwargs:
+        kwargs['automodel_class'] = AutoModel
     model, tokenizer = get_model_tokenizer_with_flash_attn(*args, **kwargs)
     return model, tokenizer
 
@@ -6902,7 +7208,10 @@ def get_additional_saved_files(model_type: str) -> List[str]:
         'qwen-vl': ['SimSun.ttf'],
         'qwen-audio': ['mel_filters.npz'],
         'yi-vl': ['vit'],
-        'minicpm-v-v2_6-chat': ['modeling_navit_siglip.py']
+        'minicpm-v-v2_6-chat': ['modeling_navit_siglip.py'],
+        'molmoe': ['modeling_molmoe.py'],
+        'molmo': ['modeling_molmo.py'],
+        'emu3-chat': ['modeling_emu3.py']
     }
     for key, files_list in files_mapping.items():
         if key in model_type:
@@ -6919,3 +7228,54 @@ def get_default_lora_target_modules(model_type: str) -> Union[List[str], str, No
     if isinstance(res, str):
         res = get_regex_for_mm_default_lora(res)
     return res
+
+
+def get_model_with_value_head(model) -> AutoModelForCausalLMWithValueHead:
+    lm_head_namings = ['lm_head', 'embed_out']
+    if not any(hasattr(model, attribute) for attribute in lm_head_namings):
+        setattr(model, 'lm_head', None)  # avoid ValueError
+
+    model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
+
+    def patch_valuehead_model(model):
+        attr_list = [
+            'get_input_embeddings', 'vis_processor', 'extract_feature', 'get_rope_index', 'model', 'vision_tower',
+            'img2emb', '_encode_image', '_merge_input_ids_with_image_features', 'prepare_inputs_embeds',
+            'build_conversation_input_ids', 'config', 'get_slice_image_placeholder', 'transform', 'get_vllm_embedding',
+            'forward_image', 'dtype', 'base_model_prefix', 'device'
+        ]
+        for attr in attr_list:
+            if hasattr(model.pretrained_model, attr) and not hasattr(model, attr):
+                setattr(model, attr, getattr(model.pretrained_model, attr))
+
+        # PPO compatible
+        if not hasattr(model, 'score'):
+            setattr(model, 'score', model.v_head)
+        if model.base_model_prefix == '' and hasattr(model.pretrained_model, 'language_model'):
+            model.base_model_prefix = model.pretrained_model.language_model.base_model_prefix
+
+    patch_valuehead_model(model)
+
+    # try to load local vhead weights
+    vhead_params = None
+    try:
+        from safetensors import safe_open
+        vhead_file = os.path.join(model.pretrained_model.model_dir, 'value_head.safetensors')
+        with safe_open(vhead_file, framework='pt', device='cpu') as f:
+            vhead_params = {key: f.get_tensor(key) for key in f.keys()}
+    except Exception:
+        pass
+
+    try:
+        vhead_file = os.path.join(model.pretrained_model.model_dir, 'value_head.bin')
+        vhead_params = torch.load(vhead_file, map_location='cpu')
+    except Exception:
+        pass
+
+    if vhead_params is not None:
+        model.load_state_dict(vhead_params, strict=False)
+        logger.info(f'Loading value head weights from {vhead_file}')
+    else:
+        logger.info('The local value head weight file was not detected.'
+                    'Ignore it if this is during the reward modeling phase,')
+    return model
