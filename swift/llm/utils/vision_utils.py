@@ -330,11 +330,11 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     use_key_frames = False
     if not use_key_frames:
         # 如果视频过长 才执行镜头分割 镜头筛选与镜内筛选 此时要密集抽帧并传到后面 比如fps=1
-        # if max_frame > 1:   # debug先写个1
-        #     sec_len = max_frame / fps
-        #     frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=sec_len)
-        # else:
-        frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
+        if max_frame > 1:   # debug先写个1
+            sec_len = round(max_frame / fps)
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=sec_len)
+        else:
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
     else:
         import time
         start = time.time()
