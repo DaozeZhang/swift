@@ -141,7 +141,7 @@ def get_block_name_to_quantize(model: nn.Module, model_type: str) -> Optional[st
     if module_lists:
         module_list = max(module_lists, key=lambda x: len(x[1]))
         _patch_model_forward(module_list[1])
-        return f'{prefix}.{module_list[0]}'
+        return f'{prefix}.{module_list[0]}'.strip('.')
 
 
 def gptq_model_quantize(model, tokenizer, batch_size):
@@ -255,18 +255,18 @@ def llm_export(args: ExportArguments) -> None:
         if args.quant_method == 'awq':
             from awq import AutoAWQForCausalLM
             model, template = prepare_model_template(
-                args, device_map=args.quant_device_map, verbose=False, automodel_class=AutoAWQForCausalLM)
+                args, device_map=args.quant_device_map, task='export', automodel_class=AutoAWQForCausalLM)
             awq_model_quantize(model, template.tokenizer, args.quant_batch_size)
             model.save_quantized(args.quant_output_dir)
         elif args.quant_method == 'gptq':
-            model, template = prepare_model_template(args, device_map=args.quant_device_map, verbose=False)
+            model, template = prepare_model_template(args, device_map=args.quant_device_map, task='export')
             gptq_quantizer = gptq_model_quantize(model, template.tokenizer, args.quant_batch_size)
             model.config.quantization_config.pop('dataset', None)
             gptq_quantizer.save(model, args.quant_output_dir)
         elif args.quant_method == 'bnb':
             args.quantization_bit = args.quant_bits
             args.bnb_4bit_compute_dtype, args.load_in_4bit, args.load_in_8bit = args.select_bnb()
-            model, template = prepare_model_template(args, device_map=args.quant_device_map, verbose=False)
+            model, template = prepare_model_template(args, device_map=args.quant_device_map, task='export')
             model.save_pretrained(args.quant_output_dir)
         else:
             raise ValueError(f'args.quant_method: {args.quant_method}')
