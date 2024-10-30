@@ -2656,7 +2656,7 @@ class HierarInternvl2Template(InternvlTemplate):
         return inputs
 
     def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        inputs, _ = super(InternvlTemplate, self)._encode(example)  # eval时example变成<image>*8 intrenvl2怎么做的呢
+        inputs, _ = super(InternvlTemplate, self)._encode(example)
         try:
             input_ids = inputs['input_ids']
         except Exception as e:
@@ -2785,7 +2785,7 @@ class HierarInternvl2Template(InternvlTemplate):
                         att_mask[i][v_sta[x]: v_end[x] + 1, v_sta[y]: v_end[y] + 1] = 0
                 # then set the valid video-video blocks as 1 according to the ref
                 ref_mask, level_sizes = get_hierar_mask(bottom_size=res['vis_sta'][i].shape[0], array_sizes=[2,2,2],
-                                                        neibor_size=3, device='cpu')
+                                                        neibor_size=5, device='cpu')
                 all_x, all_y = torch.where(ref_mask==1)
                 for x, y in zip(all_x, all_y):
                     att_mask[i][ v_sta[x] : v_end[x] + 1, v_sta[y] : v_end[y] + 1 ] = 1

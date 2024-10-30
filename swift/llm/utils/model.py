@@ -417,7 +417,9 @@ class ModelType:
     internvl2_40b_awq = 'internvl2-40b-awq'
     internvl2_llama3_76b_awq = 'internvl2-llama3-76b-awq'
 
-    hierar_internvl2 = 'hierar_internvl2'
+    hierar_internvl2_2b = 'hierar_internvl2-2b'
+    hierar_internvl2_8b = 'hierar_internvl2-8b'
+
     # deepseek
     deepseek_7b = 'deepseek-7b'
     deepseek_7b_chat = 'deepseek-7b-chat'
@@ -4786,18 +4788,31 @@ def get_model_tokenizer_internvl(model_dir: str,
 
 
 @register_model(
-    ModelType.hierar_internvl2,
-    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B',   # load 8B ckpt as init
+    ModelType.hierar_internvl2_2b,
+    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B',
     LoRATM.internvl,
     TemplateType.hierar_internvl2,
     requires=['transformers>=4.36', 'timm'],
     ignore_file_pattern=[r'.+\.zip$'],
-    support_flash_attn=True,
+    support_flash_attn=False,
     support_lmdeploy=True,
     support_vllm=True,
     placeholder_tokens=['<IMG_CONTEXT>'],
     tags=['multi-modal', 'vision', 'video'],
     hf_model_id='OpenGVLab/InternVL2-2B')
+@register_model(
+    ModelType.hierar_internvl2_8b,
+    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-8B',
+    LoRATM.internvl,
+    TemplateType.hierar_internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=False,
+    support_lmdeploy=True,
+    support_vllm=True,
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2-8B')
 def get_model_tokenizer_hierar_internvl(model_dir: str,
                                         torch_dtype: torch.dtype,
                                         model_kwargs: Dict[str, Any],
