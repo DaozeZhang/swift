@@ -2662,6 +2662,8 @@ class HierarInternvl2Template(InternvlTemplate):
         except Exception as e:
             log.error('KeyError: `input_ids` not found.')
 
+        return inputs, {}
+
         input_img_num = len(example.get('images'))
         has_img_vid_token = input_img_num != 0
         if has_img_vid_token:
