@@ -2571,15 +2571,6 @@ class HierarInternvl2Template(InternvlTemplate):
     video_segments = 8
     system = '你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。'
 
-    def replace_tag(self, media_type, index, example) -> List[Context]:
-        image_context = super().replace_tag('image', index, example)
-        if media_type == 'image':
-            return image_context
-        elif media_type == 'video':
-            video_segments = get_env_args('video_segments', int, self.video_segments)
-            load_video = partial(load_video_internvl, num_segments=video_segments)
-            return _replace_video2image(load_video, example, lambda i: [f'Frame{i + 1}: '] + image_context)
-
     def replace_object(self, index: int, example: Dict[str, Any]) -> List[Context]:
         objects = example.get('objects')
         if objects:
@@ -2654,6 +2645,17 @@ class HierarInternvl2Template(InternvlTemplate):
         inputs['hierar_mode'] = hierar_mode
         inputs['level_sizes'] = level_sizes
         return inputs
+
+    def replace_tag(self, media_type, index, example) -> List[Context]:
+        image_context = super().replace_tag('image', index, example)
+        if media_type == 'image':
+            return image_context
+        elif media_type == 'video':
+            video_index = example['video_index']
+            video = example['videos'][video_index]
+            example['images'] = load_video_internvl(video)  # load出所有帧 以备_post_encode()中筛选
+            context_list = ['<video>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造
+            return context_list
 
     def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         inputs, _ = super(InternvlTemplate, self)._encode(example)
