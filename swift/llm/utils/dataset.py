@@ -1076,13 +1076,13 @@ register_dataset(
 
 
 def _preprocess_moviechat_1k_train(dataset: DATASET_TYPE) -> DATASET_TYPE:
-    # 这里下载好视频以后再写
-    local_dir = '/mnt/workspace/.cache/modelscope/datasets/AI-ModelScope/MovieChat-1K_train/' # YOUR PATH TO DIRECTORY
+    # YOUR PATH TO raw_videos DIRECTORY
+    local_dir = '/mnt/nas1/daoze/repo/MovieChat-1k-train-video_files/MovieChat-1K_train/raw_videos/' 
     
     if not os.path.exists(local_dir):
-        logger.error(f'The video files of this MovieChat-1K_train dataset are separately zipped, therefore you need to'
-            ' download the video files from HF or MS and extract the .tar files. Then, please write the path to the'
-            ' `MovieChat-1K_train` directory (with extracted video files in it) in the _preprocess_moviechat_1k_train()'
+        logger.error(f'The video files of this MovieChat-1K_train dataset cannot be downloaded automatically.'
+            ' Therefore you need to download the video mp4 files from HF. Then, please write the path to the'
+            ' `raw_videos` directory (with mp4 video files in it) in the _preprocess_moviechat_1k_train()'
             ' in swift/llm/utils/dataset.py.')
 
     def _process(batch):    # bsz==1
@@ -1108,7 +1108,7 @@ def _preprocess_moviechat_1k_train(dataset: DATASET_TYPE) -> DATASET_TYPE:
 register_dataset(
     DatasetName.moviechat_1k_train,
     # 'AI-ModelScope/MovieChat-1K_train_filtered', 
-    '/mnt/nas1/daoze/repo/MovieChat-1K_train_filtered/',
+    '/mnt/nas1/daoze/repo/MovieChat-1K_train_filtered_json.bak/',
     None,
     _preprocess_moviechat_1k_train,
     get_dataset_from_repo,
