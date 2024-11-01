@@ -2664,9 +2664,12 @@ class HierarInternvl2Template(InternvlTemplate):
         except Exception as e:
             log.error('KeyError: `input_ids` not found.')
 
-        input_ids = inputs['input_ids']
-        inputs['_data'] = {'input_ids': torch.tensor(input_ids),
-                           'images': example['images'], }    # 在调用层 会把_data送入post_encode
+        text_query_token_pos = _findall(inputs['labels'], -100)
+        text_query_ids = torch.tensor(input_ids)[text_query_token_pos]
+
+        inputs['_data'] = {'input_ids': torch.tensor(inputs['input_ids']),
+                           'images': example['images'], 
+                           'text_query_ids': text_query_ids, }    # 在调用层 会把_data送入post_encode
         return inputs, {}
 
         input_img_num = len(example.get('images'))
@@ -2740,11 +2743,18 @@ class HierarInternvl2Template(InternvlTemplate):
         return inputs, {}
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
-        input_ids, images = data['input_ids'], data['images']
+        input_ids, images, text_query_ids = data['input_ids'], data['images'], data['text_query_ids']
 
         ori_img_num = len(images)
         # decide the number of remaining frames
-        shot_sta_indices = model.get_shot_sta_indices(images)
+        shot_list, semantic_indices = model.get_shot_list(images, model.device)
+        
+        has_video = True
+        input_size = get_env_args('input_size', int, 448)
+        max_num = get_env_args('max_num', int, 1 if has_video else 12)
+
+        semantic_indices = model.filter_shots(images, semantic_indices, transform_image, text_query_ids,
+                                              input_size, max_num, model.device, model.dtype)
 
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
@@ -2763,7 +2773,7 @@ class HierarInternvl2Template(InternvlTemplate):
             dummy_pixel_values = torch.zeros((1, 3, 32, 32), device=device, dtype=inputs_embeds.dtype)
             vit_embeds = model.extract_feature(dummy_pixel_values).to(device=device)
             inputs_embeds += vit_embeds.mean() * 0.
-        return {'inputs_embeds': inputs_embeds}     # 这里要改为更新inputs_embeds和input_ids
+        return {'inputs_embeds': inputs_embeds}     # 这里要改为更新inputs_embeds和input_ids 会用这个东西更新kwargs
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         # 在enumerate(data_iterator)时会调用该函数 对获取到的batch进行处理 Template类的该函数只会保留默认的字段

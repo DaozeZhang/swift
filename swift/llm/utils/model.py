@@ -4820,8 +4820,8 @@ def get_model_tokenizer_hierar_internvl(model_dir: str,
                                         **kwargs):
 
     model, tokenizer = get_model_tokenizer_internvl(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
-    # model.tree_conv.to('cuda') # 这里好像不能这样 会导致程序在后面失去对模型和数据cuda的协调
 
+    model.shot_detector.to(torch.float32)     # the infer of TransNetV2 must in float32 
     return model, tokenizer
 
 
