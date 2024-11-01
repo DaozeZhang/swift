@@ -2664,6 +2664,9 @@ class HierarInternvl2Template(InternvlTemplate):
         except Exception as e:
             log.error('KeyError: `input_ids` not found.')
 
+        input_ids = inputs['input_ids']
+        inputs['_data'] = {'input_ids': torch.tensor(input_ids),
+                           'images': example['images'], }    # 在调用层 会把_data送入post_encode
         return inputs, {}
 
         input_img_num = len(example.get('images'))
@@ -2736,7 +2739,13 @@ class HierarInternvl2Template(InternvlTemplate):
                          f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
         return inputs, {}
 
-    def _post_encode(self, model, data: Any) -> Dict[str, Any]:
+    def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
+        input_ids, images = data['input_ids'], data['images']
+
+        ori_img_num = len(images)
+        # decide the number of remaining frames
+        shot_sta_indices = model.get_shot_sta_indices(images)
+
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
         input_ids = data['input_ids']
@@ -2754,7 +2763,7 @@ class HierarInternvl2Template(InternvlTemplate):
             dummy_pixel_values = torch.zeros((1, 3, 32, 32), device=device, dtype=inputs_embeds.dtype)
             vit_embeds = model.extract_feature(dummy_pixel_values).to(device=device)
             inputs_embeds += vit_embeds.mean() * 0.
-        return {'inputs_embeds': inputs_embeds}
+        return {'inputs_embeds': inputs_embeds}     # 这里要改为更新inputs_embeds和input_ids
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         # 在enumerate(data_iterator)时会调用该函数 对获取到的batch进行处理 Template类的该函数只会保留默认的字段
