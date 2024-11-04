@@ -2753,8 +2753,9 @@ class HierarInternvl2Template(InternvlTemplate):
         input_size = get_env_args('input_size', int, 448)
         max_num = get_env_args('max_num', int, 1 if has_video else 12)
 
-        semantic_indices = model.filter_shots(images, semantic_indices, transform_image, text_query_ids,
-                                              input_size, max_num, model.device, model.dtype)
+        if len(shot_list) >= 6:
+            semantic_indices = model.filter_shots(images, shot_list, semantic_indices, transform_image, text_query_ids,
+                                                  input_size, max_num, model.device, model.dtype)
 
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
