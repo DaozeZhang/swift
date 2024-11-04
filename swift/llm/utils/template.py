@@ -2724,7 +2724,7 @@ class HierarInternvl2Template(InternvlTemplate):
             coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + img_end_pos + 2 # 闭区间
             inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
             inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
-        
+
         inputs['input_ids_bak'] = torch.tensor(input_ids).unsqueeze(0)
 
         if inputs['labels'] is None: 
