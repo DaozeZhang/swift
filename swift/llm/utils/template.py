@@ -2744,24 +2744,47 @@ class HierarInternvl2Template(InternvlTemplate):
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
         input_ids, images, text_query_ids = data['input_ids'], data['images'], data['text_query_ids']
-
         ori_img_num = len(images)
-        # decide the number of remaining frames
-        shot_list, semantic_indices = model.get_shot_list(images, model.device)
-        
-        has_video = True
-        input_size = get_env_args('input_size', int, 448)
-        max_num = get_env_args('max_num', int, 1 if has_video else 12)
 
-        if len(shot_list) >= 6:
-            semantic_indices = model.filter_shots(images, shot_list, semantic_indices, transform_image, text_query_ids,
-                                                  input_size, max_num, model.device, model.dtype)
-
+        # first, get the text embeds to know the device 
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
-        input_ids = data['input_ids']
         inputs_embeds = embedding(input_ids[None])[0].to(device=device)
-        pixel_values = data['pixel_values']
+
+        # filter shots (need training)
+        shot_list, semantic_indices = model.get_shot_list(images, device)
+        
+        if len(shot_list) >= 6:
+            has_video = True
+            input_size = get_env_args('input_size', int, 448)
+            max_num = get_env_args('max_num', int, 1 if has_video else 12)
+
+            keep_shot_mask = model.filter_shots(images, semantic_indices, transform_image, text_query_ids,
+                                                input_size, max_num, device, model.dtype)
+            _images, _sem_indices, _shot_list = [], [], []
+            for i in range(len(keep_shot_mask)):
+                if keep_shot_mask[i] == 1:
+                    s, e = shot_list[i]
+                    _images += images[ s : e + 1 ]
+                    _sem_indices.append(semantic_indices[i])
+                    _shot_list.append( [ len(_images) - (e-s+1), len(_images) - 1 ] )
+            images = _images
+            semantic_indices = _sem_indices
+            shot_list = _shot_list
+
+        # filter intra-shot (not trainable)
+        pixel_values = [transform_image(image, input_size, max_num) for image in images]
+        num_patches = [pv.shape[0] for pv in pixel_values]
+        pixel_values = torch.cat(pixel_values).to(self.model.dtype)
+
+        vit_embeds = model.extract_feature(pixel_values).to(device=device)
+        # 把镜头内每个帧和镜头的语义帧求相似度
+
+
+        # <video>  =>  Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img>
+
+        # get vit_embeds and 
+        
         if pixel_values is not None:
             pixel_values = pixel_values.to(device=device)
             vit_embeds = model.extract_feature(pixel_values).to(device=device)  #
