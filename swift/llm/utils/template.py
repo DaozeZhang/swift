@@ -2598,6 +2598,17 @@ class HierarInternvl2Template(InternvlTemplate):
         else:
             return ['<bbox>']
 
+    def replace_tag(self, media_type, index, example) -> List[Context]:
+        image_context = super().replace_tag('image', index, example)
+        if media_type == 'image':
+            return image_context
+        elif media_type == 'video':
+            video_index = example['video_index']
+            video = example['videos'][video_index]
+            example['images'] = load_video_internvl(video)  # load出所有帧 以备_post_encode()中筛选
+            context_list = ['<video>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造
+            return context_list
+
     def insert_coaser_img(self, inputs, nframes):
         input_ids = inputs['input_ids']
         labels = inputs.get('labels')
@@ -2646,17 +2657,6 @@ class HierarInternvl2Template(InternvlTemplate):
         inputs['level_sizes'] = level_sizes
         return inputs
 
-    def replace_tag(self, media_type, index, example) -> List[Context]:
-        image_context = super().replace_tag('image', index, example)
-        if media_type == 'image':
-            return image_context
-        elif media_type == 'video':
-            video_index = example['video_index']
-            video = example['videos'][video_index]
-            example['images'] = load_video_internvl(video)  # load出所有帧 以备_post_encode()中筛选
-            context_list = ['<video>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造
-            return context_list
-
     def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         inputs, _ = super(InternvlTemplate, self)._encode(example)
         try:
@@ -2669,22 +2669,25 @@ class HierarInternvl2Template(InternvlTemplate):
 
         inputs['_data'] = {'input_ids': torch.tensor(inputs['input_ids']),
                            'images': example['images'], 
-                           'text_query_ids': text_query_ids, }    # 在调用层 会把_data送入post_encode
+                           'text_query_ids': text_query_ids, 
+                           'videos': example['videos']}    # 在调用层 会把_data送入post_encode
         return inputs, {}
 
-        input_img_num = len(example.get('images'))
+    def _ori_encode(self, inputs):
+        input_ids = inputs['input_ids']
+        images = inputs['images']
+        labels = inputs.get('labels')
+
+        input_img_num = len(images)
         has_img_vid_token = input_img_num != 0
         if has_img_vid_token:
-            inputs = self.insert_coaser_img(inputs, input_img_num)
+            inputs = self.insert_coaser_img(input_ids, labels, input_img_num)
         else:
             inputs['hierar_mode'], inputs['level_sizes'] = 'pure_text_input', None
 
         if len(inputs) == 0:
             return inputs, {}
-        input_ids = inputs['input_ids']
         idx_list = _findall(input_ids, -100)    # Template的_encode会把帧的位置设为-100
-        labels = inputs.get('labels')
-        images = example.get('images')
         if images:
             # has_video = bool(example.get('videos')) # 在eval时可能并没有video字段 此时max_num=12 将把每帧转为9个patch 下面num_patch=9
             has_video = True                          # 目前只做视频的实验 has_video直接置True
@@ -2709,10 +2712,12 @@ class HierarInternvl2Template(InternvlTemplate):
                                                                                              + 1:]
             added_tokens_len += len(img_tokens) - 1     # 255 
         # ...context... Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img> ...context...
+
+        inputs = dict()
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
-        inputs['_data'] = {'input_ids': torch.tensor(input_ids), 'pixel_values': pixel_values}
-        inputs.pop('loss_scale', None)
+        # inputs['_data'] = {'input_ids': torch.tensor(input_ids), 'pixel_values': pixel_values}
+        # inputs.pop('loss_scale', None)
 
         if inputs['hierar_mode'] == 'pure_text_input':
             inputs['vis_sta'], inputs['vis_end'], inputs['coaser_sta'], inputs['coaser_end'] = -1, -1, -1, -1
@@ -2751,7 +2756,7 @@ class HierarInternvl2Template(InternvlTemplate):
         device = embedding.weight.device
         inputs_embeds = embedding(input_ids[None])[0].to(device=device)
 
-        # filter shots (need training)
+        # 1. filter shots (need training)
         shot_list, semantic_indices = model.get_shot_list(images, device)
         
         if len(shot_list) >= 6:
@@ -2759,31 +2764,58 @@ class HierarInternvl2Template(InternvlTemplate):
             input_size = get_env_args('input_size', int, 448)
             max_num = get_env_args('max_num', int, 1 if has_video else 12)
 
-            keep_shot_mask = model.filter_shots(images, semantic_indices, transform_image, text_query_ids,
+            keep_shot_mask = model.filter_shots(images, shot_list, semantic_indices, transform_image, text_query_ids,
                                                 input_size, max_num, device, model.dtype)
             _images, _sem_indices, _shot_list = [], [], []
             for i in range(len(keep_shot_mask)):
                 if keep_shot_mask[i] == 1:
                     s, e = shot_list[i]
                     _images += images[ s : e + 1 ]
-                    _sem_indices.append(semantic_indices[i])
-                    _shot_list.append( [ len(_images) - (e-s+1), len(_images) - 1 ] )
+                    _s, _e = int(len(_images) - (e-s+1)), len(_images) - 1
+                    _shot_list.append( [_s, _e] )
+                    _sem_indices.append( (_s + _e) // 2 )
             images = _images
-            semantic_indices = _sem_indices
-            shot_list = _shot_list
+            semantic_indices = torch.tensor(_sem_indices)
+            shot_list = torch.tensor(_shot_list)
 
-        # filter intra-shot (not trainable)
+        # 2. filter intra-shot (not trainable)
         pixel_values = [transform_image(image, input_size, max_num) for image in images]
         num_patches = [pv.shape[0] for pv in pixel_values]
-        pixel_values = torch.cat(pixel_values).to(self.model.dtype)
+        pixel_values = torch.cat(pixel_values, dim=0)              # [res1_img_num, 3, input_size=448, input_size]
+        pixel_values = pixel_values.to(self.model.dtype).to(device)
 
-        vit_embeds = model.extract_feature(pixel_values).to(device=device)
-        # 把镜头内每个帧和镜头的语义帧求相似度
+        vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=device) # [res_img_num, 256, vit_dim]
+
+        _vit_embeds = []
+        for i, (l, r) in enumerate(shot_list):
+            if r > l + 1:
+                frames_in_cur_shot = vit_embeds[l : r + 1, :, :]        # [cur_shot_frame_num, 256, vit_dim]
+                seman_in_cur_shot = vit_embeds[ semantic_indices[i] ]   # [256, vit_dim]
+                sim = torch.matmul(frames_in_cur_shot, seman_in_cur_shot.permute(1, 0)) # [cur_shot_frame_num, 256, 256]
+                sim = torch.mean(sim, (1, 2))
+
+                _, keep_frame_indices = torch.topk(sim, k=int((len(sim) + 1) // 2), dim=0, largest=False)
+                keep_frame_indices = torch.sort(keep_frame_indices)[0]
+                
+                keep_frame_indices += l
+                _vit_embeds.append(vit_embeds[keep_frame_indices, :, :])
+            else:
+                _vit_embeds.append(vit_embeds[l : r + 1, :, :])
+        vit_embeds = torch.cat(_vit_embeds, dim=0)  # [res2_img_num, 3, input_size=448, input_size]
+        # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
+        
+        #  <video>  =>  Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img>
+        all_vit_embeds = model.tree_conv_from_vit_embeds(vit_embeds)    # 得到coaser的embeds
+
+        data['images'] = images
+        data = self._ori_encode(data)
+
+        selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
+        inputs_embeds[selected] = all_vit_embeds.reshape(-1, all_vit_embeds.shape[-1])
+        return {'input_ids': input_ids,
+                'inputs_embeds': inputs_embeds,}
 
 
-        # <video>  =>  Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img>
-
-        # get vit_embeds and 
         
         if pixel_values is not None:
             pixel_values = pixel_values.to(device=device)

@@ -5,14 +5,39 @@ import torch.nn.functional as F
 
 
 
-logits = torch.tensor([
-    [1, 2, 3],
-    [6, 5, 4]
-]).float()
+# probs = torch.tensor([
+#     [0.1, 0.9],
+#     [0.2, 0.8],
+#     [0.7, 0.3],
+# ]).float()
 
-res1 = F.gumbel_softmax(logits, tau=1, hard=False)
+# logits = torch.log(probs)
 
-res2 = F.gumbel_softmax(logits, tau=1, hard=True)
+# def gumbel_softmax_multi_hot(logits, tau=1.0, hard=False, k=1) -> torch.Tensor:
+#     gumbels = -torch.empty_like(logits).exponential_().log()    # 生成 Gumbel(0,1) 噪声
+#     gumbels = (logits + gumbels) / tau                          # 添加噪声并进行温度缩放
+#     y_soft = gumbels.softmax(dim=-1)
+
+#     if hard:
+#         _, topk_indices = torch.topk(y_soft, k, dim=0)
+#         y_hard = torch.zeros_like(logits).scatter_(dim, topk_indices, 1.0)
+#         ret = y_hard - y_soft.detach() + y_soft     # 直通估计器 让梯度能沿着y_soft传回产生logits的模块
+#     else:
+#         ret = y_soft
+#     return ret
+
+# res = gumbel_softmax_multi_hot(logits, hard=True)
+
+
+sim = torch.tensor([0.1, 0.2, 0.3, -0.4])
+
+sim_prob_1 = torch.sigmoid(sim)
+sim_prob_0 = torch.ones_like(sim) - sim_prob_1
+sim_prob = torch.stack([sim_prob_0, sim_prob_1], dim=1)
+
+logits = torch.log_softmax(sim_prob, dim=-1)
+
+res = F.gumbel_softmax(logits, hard=True)
 
 ...
 
