@@ -1,20 +1,116 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
+# 简单的Transformer Encoder层示例
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, embed_size, num_heads, dropout=0.1):
+        super(TransformerEncoderLayer, self).__init__()
+        self.attention = nn.MultiheadAttention(embed_size, num_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(embed_size)
+        self.norm2 = nn.LayerNorm(embed_size)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_size, embed_size * 4),
+            nn.ReLU(),
+            nn.Linear(embed_size * 4, embed_size)
+        )
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, src, src_mask=None):
+        attn_output, _ = self.attention(src, src, src, attn_mask=src_mask)
+        src = self.norm1(src + self.dropout(attn_output))
+        ffn_output = self.ffn(src)
+        src = self.norm2(src + self.dropout(ffn_output))
+        return src
+
+# 模型示例
+class SimpleLLM(nn.Module):
+    def __init__(self, vocab_size, embed_size, num_heads, num_layers, dropout=0.1):
+        super(SimpleLLM, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.layers = nn.ModuleList([TransformerEncoderLayer(embed_size, num_heads, dropout) for _ in range(num_layers)])
+        self.fc_out = nn.Linear(embed_size, vocab_size)
+
+        self.l1 = nn.Linear(embed_size, embed_size)
+        self.l2 = nn.Linear(embed_size, embed_size)
+        self.l3 = nn.Linear(embed_size, embed_size)
+
+    def forward(self, x, mask=None):
+        embedding = self.embedding(x).transpose(0, 1)  # Shape: [seq_len, batch_size, embed_size]
+
+        embedding_1 = self.l1(embedding[0:7, :, :])
+        embedding_2 = self.l2(embedding[7:10, :, :])
+        embedding_3 = self.l3(embedding[10:, :, :])
+        embedding = torch.cat([embedding_1, embedding_2, embedding_3], dim=0)
+
+        for layer in self.layers:
+            embedding = layer(embedding, src_mask=mask)
+        output = self.fc_out(embedding).transpose(0, 1)  # Shape: [batch_size, seq_len, vocab_size]
+        return output
 
 
+        
+vocab_size = 50
+model = SimpleLLM(vocab_size=vocab_size, embed_size=16, num_heads=2, num_layers=3, )
+
+# 输入序列: batch_size=1, seq_len=15
+input_ids = torch.randint(0, vocab_size, (1, 15))
+
+# 设置labels
+labels = torch.full((1, 15), -100)
+labels[:, 12:] = torch.randint(0, vocab_size, (1, 3))
+# labels[:, 10:] = torch.randint(0, vocab_size, (1, 5))
+
+# Attention Mask设计  # mask shape: [seq_len, seq_len]
+# 1表示可以关注，0表示不可以
+mask = torch.zeros(15, 15)
 
 
-logits = torch.tensor([
-    [1, 2, 3],
-    [6, 5, 4]
-]).float()
+mask[0:7, :] = 1    # 0-6可以关注0-6和7-9和10-14
+mask[7:10, 0:10] = 1 # 7-9可以关注0-6和7-9
+mask[10:, 0:7] = 1  # 10-14可以关注0:6和10-14
+mask[10:, 10:] = 1
+# 7-9与10-14不互相关注  already set to 0 by default
 
-res1 = F.gumbel_softmax(logits, tau=1, hard=False)
+def create_lower_triangle_matrix(n):
+    matrix = [[0 for _ in range(n)] for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1):
+            matrix[i][j] = 1
+    return torch.tensor(matrix)
 
-res2 = F.gumbel_softmax(logits, tau=1, hard=True)
+lower_triangle = create_lower_triangle_matrix(15)
 
-...
+mask = torch.logical_and(mask, lower_triangle)
+
+attn_mask = (mask == 0).float() * -1e9  # 将mask转为float，并将不能关注的位置设为 -inf
+
+
+logits = model(input_ids, mask=attn_mask)
+
+shift_logits = logits[:, :-1, :].contiguous()
+shift_labels = labels[:, 1:].contiguous()
+shift_logits = shift_logits.view(-1, vocab_size)
+shift_labels = shift_labels.view(-1).to(shift_logits.device)
+loss_fct = nn.CrossEntropyLoss()
+loss = loss_fct(shift_logits, shift_labels)
+
+
+def hook_fn(grad):
+    print("Gradient flowing through l2:", grad.norm().item())
+
+model.l2.weight.register_hook(hook_fn)
+model.l2.bias.register_hook(hook_fn)
+
+
+loss.backward()
+
+for name, param in model.named_parameters():
+    if param.requires_grad and param.grad is not None:
+        print(f"{name} grad norm: {param.grad.norm().item()}")
+    elif param.requires_grad:
+        print(f"{name} grad is None")
+
 
 
 

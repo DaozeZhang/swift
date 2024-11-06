@@ -2791,6 +2791,11 @@ class HierarInternvl2Template(InternvlTemplate):
                     att_mask[i][ v_sta[x] : v_end[x] + 1, v_sta[y] : v_end[y] + 1 ] = 1
             res['trsfm_att_mask'] = torch.stack(att_mask, dim=0)
 
+        # # !!!!试一试让coaser部分全为1 看看会不会让tree_conv中 七个之前的模块有梯度
+        # sta, end = batch[0]['coaser_sta'][0][0], batch[0]['coaser_end'][0][3]
+        # # res['trsfm_att_mask'][:, sta : end + 1, : ] = 1    # debug 只考虑bsz=1情况 横向
+        # res['trsfm_att_mask'][:, last_coaser_end[0] + 1 :, sta : end + 1 ] = 1   # 纵向
+
         return res
 
 register_template(TemplateType.hierar_internvl2, HierarInternvl2Template(), use_model=True, lazy_tokenize=True)
