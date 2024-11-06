@@ -280,7 +280,7 @@ def get_semantic_indices(video, ori_fps, num_segments ):
     seman_indices_in_ori = torch.tensor(seman_indices_in_ori)
     return seman_indices_in_ori
 
-def get_hierar_mask(bottom_size, array_sizes, neibor_size, device):
+def get_hierar_mask(bottom_size, array_sizes, neibor_size, device, put_coaser_ahead=False):
     """Get the attention mask of PAM-Naive"""
     input_size = bottom_size
     window_size = array_sizes
@@ -317,6 +317,15 @@ def get_hierar_mask(bottom_size, array_sizes, neibor_size, device):
             mask[i, left_side:right_side] = 1
             mask[left_side:right_side, i] = 1
 
+    if put_coaser_ahead:
+        coaser_size = sum(all_size[1:])
+        new_mask = torch.zeros_like(mask)
+        new_mask[-input_size:, -input_size:] = mask[:input_size, :input_size]
+        new_mask[:coaser_size, :coaser_size] = mask[-coaser_size:, -coaser_size:]
+        new_mask[:coaser_size, -input_size:] = mask[-coaser_size:, :input_size]
+        new_mask[-input_size:, :coaser_size] = mask[:input_size, -coaser_size:]
+        return new_mask, all_size
+    
     return mask, all_size
 
 @load_file_decorator

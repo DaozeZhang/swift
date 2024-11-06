@@ -2611,26 +2611,27 @@ class HierarInternvl2Template(InternvlTemplate):
         input_ids = inputs['input_ids']
         labels = inputs.get('labels')
 
-        img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
-        img_end_pos = _findall(input_ids, img_end_token_id)[-1] # the last </img>
+        img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False) 
+        img_sta_pos = _findall(input_ids, img_sta_token_id)[0] # the first <img> 
 
         hierar_mode = 'llm_not_use_coasers'
         if hierar_mode == 'llm_use_coasers':
-            i, cur_level_num = 0, nframes // 2
-            level_sizes = [nframes]
-            res: List[int] = self.tokenizer.encode(f'The aggregate visual tokens of different levels of these '
-                                                   f'video frame images are also given below, you can also refer to '
-                                                   f'them:\n', add_special_tokens=False)
-            while cur_level_num > 0:
-                one_coaser_img = \
-                    self.tokenizer.encode(f'Coaser Level{i}: <coaser_img>', add_special_tokens=False) + \
-                    self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1 + \
-                    self.tokenizer.encode('</coaser_img>\n', add_special_tokens=False)
-                res += one_coaser_img * cur_level_num
+            # i, cur_level_num = 0, nframes // 2
+            # level_sizes = [nframes]
+            # res: List[int] = self.tokenizer.encode(f'The aggregate visual tokens of different levels of these '
+            #                                        f'video frame images are also given below, you can also refer to '
+            #                                        f'them:\n', add_special_tokens=False)
+            # while cur_level_num > 0:
+            #     one_coaser_img = \
+            #         self.tokenizer.encode(f'Coaser Level{i}: <coaser_img>', add_special_tokens=False) + \
+            #         self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1 + \
+            #         self.tokenizer.encode('</coaser_img>\n', add_special_tokens=False)
+            #     res += one_coaser_img * cur_level_num
 
-                i += 1
-                level_sizes.append(cur_level_num)
-                cur_level_num = cur_level_num // 2
+            #     i += 1
+            #     level_sizes.append(cur_level_num)
+            #     cur_level_num = cur_level_num // 2   这段代码待修改 要把coaser放在前面
+            ...
         elif hierar_mode == 'llm_not_use_coasers':
             i, cur_level_num = 0, nframes // 2
             level_sizes = [nframes]
@@ -2644,10 +2645,16 @@ class HierarInternvl2Template(InternvlTemplate):
                 level_sizes.append(cur_level_num)
                 cur_level_num = cur_level_num // 2
 
-        # </img> \n ...insert_coaser_img...
-        input_ids = input_ids[:img_end_pos + 2] + res + input_ids[img_end_pos + 2:]
+        # 找到第一个<img>前面的\n    插入位置是 <|im_end|><|im_start|>user\n [INSERT HERE] Frame1: <img>          
+        i = 1
+        enter_token = self.tokenizer.encode('\n', add_special_tokens=False)[0]
+        while input_ids[img_sta_pos - i] != enter_token: 
+            i += 1
+        insert_pos = img_sta_pos - i
+
+        input_ids = input_ids[:insert_pos + 1] + res + input_ids[insert_pos + 1:]
         if labels is not None:
-            labels = labels[:img_end_pos + 2] + [-100] * len(res) + labels[img_end_pos + 2:]
+            labels = labels[:insert_pos + 1] + [-100] * len(res) + labels[insert_pos + 1:]
 
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
@@ -2719,9 +2726,14 @@ class HierarInternvl2Template(InternvlTemplate):
             coaser_img_num = sum(inputs['level_sizes'][1:])
             img_end_pos = _findall(input_ids, img_end_token_id)[-1]  # the last </img>
 
-            # </img> \n ...coaser_img...
-            coaser_sta = torch.tensor([ i * self.num_image_token for i in range(coaser_img_num)]) + img_end_pos + 2
-            coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + img_end_pos + 2 # 闭区间
+            # 第一个<IMG_CONTEXT>即为插入位置
+            img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)
+            first_coaser_sta = _findall(input_ids, img_context_id)[0]
+
+            coaser_sta = torch.tensor([ i * self.num_image_token for i in range(coaser_img_num)]) + first_coaser_sta
+            coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + first_coaser_sta  # 闭区间
+            assert all(coaser_end - coaser_sta + 1 == self.num_image_token)
+
             inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
             inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
 
@@ -2732,7 +2744,7 @@ class HierarInternvl2Template(InternvlTemplate):
                          f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
         return inputs, {}
 
-    def _post_encode(self, model, data: Any) -> Dict[str, Any]:
+    def _post_encode(self, model, data: Any) -> Dict[str, Any]: # 这个是在compute_loss里调用的 才能经过模型
         embedding = model.get_input_embeddings()
         device = embedding.weight.device
         input_ids = data['input_ids']
@@ -2778,14 +2790,14 @@ class HierarInternvl2Template(InternvlTemplate):
                 att_mask[i][:, first_coaser_sta[i] : last_coaser_end[i] + 1] = 0
                 ## set the blocks about videos
                 # first make all the video-video blocks as 0
-                v_sta = torch.cat([ res['vis_sta'][i, :], res['coaser_sta'][i, :] ])
-                v_end = torch.cat([ res['vis_end'][i, :], res['coaser_end'][i, :] ])
+                v_sta = torch.cat([ res['coaser_sta'][i, :], res['vis_sta'][i, :] ])
+                v_end = torch.cat([ res['coaser_end'][i, :], res['vis_end'][i, :] ])
                 for x in range(len(v_sta)):
                     for y in range(len(v_sta)):
                         att_mask[i][v_sta[x]: v_end[x] + 1, v_sta[y]: v_end[y] + 1] = 0
                 # then set the valid video-video blocks as 1 according to the ref
                 ref_mask, level_sizes = get_hierar_mask(bottom_size=res['vis_sta'][i].shape[0], array_sizes=[2,2,2],
-                                                        neibor_size=5, device='cpu')
+                                                        neibor_size=5, device='cpu', put_coaser_ahead=True)
                 all_x, all_y = torch.where(ref_mask==1)
                 for x, y in zip(all_x, all_y):
                     att_mask[i][ v_sta[x] : v_end[x] + 1, v_sta[y] : v_end[y] + 1 ] = 1
