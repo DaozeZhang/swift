@@ -2606,15 +2606,37 @@ class HierarInternvl2Template(InternvlTemplate):
             video_index = example['video_index']
             video = example['videos'][video_index]
             example['images'] = load_video_internvl(video)  # load出所有帧 以备_post_encode()中筛选
-            context_list = ['<video>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造
+            context_list = ['<IMG_CONTEXT>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造 用一个<IMG_CONTEXT>代替
             return context_list
 
-    def insert_coaser_img(self, inputs, nframes):
+    def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        inputs, _ = super(InternvlTemplate, self)._encode(example)
+        try:
+            input_ids = inputs['input_ids']
+        except Exception as e:
+            log.error('KeyError: `input_ids` not found.')
+
+        text_query_token_pos = _findall(inputs['labels'], -100)
+        text_query_ids = torch.tensor(input_ids)[text_query_token_pos]
+
+        inputs['_data'] = {'input_ids': torch.tensor(inputs['input_ids']),
+                           'labels': inputs['labels'],
+                           'images': example['images'], 
+                           'text_query_ids': text_query_ids, 
+                           'videos': example['videos']}    # 在调用层 会把_data送入post_encode
+        return inputs, {}
+
+    def insert_coaser_img(self, inputs, nframes):    # 将唯一的一个<IMG_CONTEXT>替换为很多<IMG_CONTEXT>
         input_ids = inputs['input_ids']
         labels = inputs.get('labels')
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids.tolist()
 
-        img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False) 
-        img_sta_pos = _findall(input_ids, img_sta_token_id)[0] # the first <img> 
+        vid_token_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) 
+        vid_pos = _findall(input_ids, vid_token_id) # find that <IMG_CONTEXT>
+        assert len(vid_pos) == 1
+        vid_pos = vid_pos[0]
+        array_num = self.model.config.array_num
 
         hierar_mode = 'llm_not_use_coasers'
         if hierar_mode == 'llm_use_coasers':
@@ -2635,28 +2657,20 @@ class HierarInternvl2Template(InternvlTemplate):
             #     cur_level_num = cur_level_num // 2    这段代码待修改 要把coaser放在前面
             ...
         elif hierar_mode == 'llm_not_use_coasers':
-            i, cur_level_num = 0, nframes // 2
+            i, cur_level_num = 0, nframes // array_num
             level_sizes = [nframes]
             res = []
-            while cur_level_num > 0:
+            for i in range(3):
                 one_coaser_img = \
                     self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1
                 res += one_coaser_img * cur_level_num
 
-                i += 1
                 level_sizes.append(cur_level_num)
-                cur_level_num = cur_level_num // 2
+                cur_level_num = cur_level_num // array_num
 
-        # 找到第一个<img>前面的\n    插入位置是 <|im_end|><|im_start|>user\n [INSERT HERE] Frame1: <img>          
-        i = 1
-        enter_token = self.tokenizer.encode('\n', add_special_tokens=False)[0]
-        while input_ids[img_sta_pos - i] != enter_token: 
-            i += 1
-        insert_pos = img_sta_pos - i
-
-        input_ids = input_ids[:insert_pos + 1] + res + input_ids[insert_pos + 1:]
+        input_ids = input_ids[:vid_pos] + res + input_ids[vid_pos + 1:]
         if labels is not None:
-            labels = labels[:insert_pos + 1] + [-100] * len(res) + labels[insert_pos + 1:]
+            labels = labels[:vid_pos] + [-100] * len(res) + labels[vid_pos + 1:]
 
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
@@ -2664,21 +2678,185 @@ class HierarInternvl2Template(InternvlTemplate):
         inputs['level_sizes'] = level_sizes
         return inputs
 
-    def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        inputs, _ = super(InternvlTemplate, self)._encode(example)
-        try:
-            input_ids = inputs['input_ids']
-        except Exception as e:
-            log.error('KeyError: `input_ids` not found.')
+    def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
+        input_ids, labels, images, text_query_ids = data['input_ids'], data['labels'], data['images'], data['text_query_ids']
+        ori_img_num = len(images)
 
-        text_query_token_pos = _findall(inputs['labels'], -100)
-        text_query_ids = torch.tensor(input_ids)[text_query_token_pos]
+        # first, get the text embeds to know the device 
+        embedding = model.get_input_embeddings()
+        device = embedding.weight.device
+        inputs_embeds = embedding(input_ids[None])[0].to(device=device)
 
-        inputs['_data'] = {'input_ids': torch.tensor(inputs['input_ids']),
-                           'images': example['images'], 
-                           'text_query_ids': text_query_ids, 
-                           'videos': example['videos']}    # 在调用层 会把_data送入post_encode
+        # 1. filter shots (need training)
+        shot_list, semantic_indices = model.get_shot_list(images, device)
+        
+        if len(shot_list) >= 6:
+            has_video = True
+            input_size = get_env_args('input_size', int, 448)
+            max_num = get_env_args('max_num', int, 1 if has_video else 12)
+
+            keep_shot_mask = model.filter_shots(images, shot_list, semantic_indices, transform_image, text_query_ids,
+                                                input_size, max_num, device, model.dtype)
+            _images, _sem_indices, _shot_list = [], [], []
+            for i in range(len(keep_shot_mask)):
+                if keep_shot_mask[i] == 1:
+                    s, e = shot_list[i]
+                    _images += images[ s : e + 1 ]
+                    _s, _e = int(len(_images) - (e-s+1)), len(_images) - 1
+                    _shot_list.append( [_s, _e] )
+                    _sem_indices.append( (_s + _e) // 2 )
+            images = _images
+            semantic_indices = torch.tensor(_sem_indices)
+            shot_list = torch.tensor(_shot_list)
+
+        # 2. filter intra-shot (not trainable)
+        pixel_values = [transform_image(image, input_size, max_num) for image in images]
+        num_patches = [pv.shape[0] for pv in pixel_values]
+        pixel_values = torch.cat(pixel_values, dim=0)              # [res1_img_num, 3, input_size=448, input_size]
+        pixel_values = pixel_values.to(self.model.dtype).to(device)
+
+        vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=device) # [res_img_num, 256, vit_dim]
+
+        _vit_embeds = []
+        for i, (l, r) in enumerate(shot_list):
+            if r > l + 1:
+                frames_in_cur_shot = vit_embeds[l : r + 1, :, :]        # [cur_shot_frame_num, 256, vit_dim]
+                seman_in_cur_shot = vit_embeds[ semantic_indices[i] ]   # [256, vit_dim]
+                sim = torch.matmul(frames_in_cur_shot, seman_in_cur_shot.permute(1, 0)) # [cur_shot_frame_num, 256, 256]
+                sim = torch.mean(sim, (1, 2))
+
+                _, keep_frame_indices = torch.topk(sim, k=int((len(sim) + 1) // 2), dim=0, largest=False)
+                keep_frame_indices = torch.sort(keep_frame_indices)[0]
+                
+                keep_frame_indices += l
+                _vit_embeds.append(vit_embeds[keep_frame_indices, :, :])
+            else:
+                _vit_embeds.append(vit_embeds[l : r + 1, :, :])
+        vit_embeds = torch.cat(_vit_embeds, dim=0)  # [res2_img_num, 3, input_size=448, input_size]
+        # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
+        
+        # 将 <video> 替换为 Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img>
+        all_vit_embeds = model.tree_conv_from_vit_embeds(vit_embeds)    # 得到coaser的embeds
+        del data['images']  # 要images已经没用了，省点空间
+        # data['images'] = images 
+        # data = self._ori_encode(data) 
+
+        input_img_num = all_vit_embeds.shape[0]
+        inputs = data
+        
+        has_img_vid_token = input_img_num != 0
+        if has_img_vid_token:
+            inputs = self.insert_coaser_img(inputs=inputs, nframes=input_img_num)  # 把data里 input_ids中视频位置替换为很多<IMG_CONTEXT> labels也相应替换
+        else:
+            inputs['hierar_mode'], inputs['level_sizes'] = 'pure_text_input', None
+        
+        input_ids = inputs['input_ids']
+        if len(inputs) == 0:
+            return inputs, {}
+
+        # 原本应该是在_encode里第一步调用Template的_encode时 会插入Frame 1:字样 并把帧的位置设为-100 
+        # 因此我们现在手动做这一步 就紧跟在coaser的很多个<IMG_CONTEXT>的后面
+        # image_context = super().replace_tag('image', index, example)    # 调用InternvlTemplate的replace_tag
+        img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)
+        ori_frame_list = []
+        for i in range(input_img_num):
+            ori_frame_list += [f'Frame{i + 1}: '] + [img_context_id] * 256 + ['\n'] # 这个末尾有没有\n存疑 明天到InternvlTemplate的replace_tag里看看
+        098670
+        coaser_end_pos = _findall(input_ids, img_context_id)[-1]  
+        input_ids = input_ids[: coaser_end_pos + 1] + context_list + input_ids[coaser_end_pos + 1 :]      
+        # 以上这一小段还没检查
+        
+        idx_list = _findall(input_ids, -100)    
+        if images:
+            # has_video = bool(example.get('videos')) # 在eval时可能并没有video字段 此时max_num=12 将把每帧转为9个patch 下面num_patch=9
+            has_video = True                          # 目前只做视频的实验 has_video直接置True
+            input_size = get_env_args('input_size', int, 448)
+            max_num = get_env_args('max_num', int, 1 if has_video else 12)
+            pixel_values = [transform_image(image, input_size, max_num) for image in images]
+            num_patches = [pv.shape[0] for pv in pixel_values]
+            pixel_values = torch.cat(pixel_values).to(self.model.dtype)
+        else:
+            pixel_values = None
+            num_patches = []
+        assert len(num_patches) == len(
+            idx_list), f'len(num_patches): {len(num_patches)}, len(idx_list): {len(idx_list)}'
+        added_tokens_len = 0
+        for idx, num_patch in zip(idx_list, num_patches):
+            img_tokens: List[int] = self.tokenizer.encode(
+                '<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * num_patch
+            # 把idx位置的-100 替换为256个<IMG_CONTEXT>
+            input_ids = input_ids[:idx + added_tokens_len] + img_tokens + input_ids[idx + added_tokens_len + 1:]
+            if labels is not None:
+                labels = labels[:idx + added_tokens_len] + [-100] * len(img_tokens) + labels[idx + added_tokens_len
+                                                                                             + 1:]
+            added_tokens_len += len(img_tokens) - 1     # 255 
+        # ...context... Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img> ...context...
+
+        inputs = dict()
+        inputs['input_ids'] = input_ids
+        inputs['labels'] = labels
+        # inputs['_data'] = {'input_ids': torch.tensor(input_ids), 'pixel_values': pixel_values}
+        # inputs.pop('loss_scale', None)
+
+        if inputs['hierar_mode'] == 'pure_text_input':
+            inputs['vis_sta'], inputs['vis_end'], inputs['coaser_sta'], inputs['coaser_end'] = -1, -1, -1, -1
+        if inputs['hierar_mode'] == 'llm_use_coasers':
+            ...
+        elif inputs['hierar_mode'] == 'llm_not_use_coasers':
+            import numpy as np
+            img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False)
+            img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
+            vis_sta = torch.tensor(_findall(input_ids, img_sta_token_id)) + 1
+            vis_end = torch.tensor(_findall(input_ids, img_end_token_id)) - 1   # 闭区间
+            assert all(vis_end - vis_sta + 1 == self.num_image_token)
+
+            coaser_img_num = sum(inputs['level_sizes'][1:])
+            img_end_pos = _findall(input_ids, img_end_token_id)[-1]  # the last </img>
+
+            # 第一个<IMG_CONTEXT>即为插入位置
+            img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)
+            first_coaser_sta = _findall(input_ids, img_context_id)[0]
+
+            coaser_sta = torch.tensor([ i * self.num_image_token for i in range(coaser_img_num)]) + first_coaser_sta
+            coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + first_coaser_sta  # 闭区间
+            assert all(coaser_end - coaser_sta + 1 == self.num_image_token)
+
+            inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
+            inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
+        
+        inputs['input_ids_bak'] = torch.tensor(input_ids).unsqueeze(0)
+
+        if inputs['labels'] is None: 
+            logger.error(f'The value of `labels` is None (ignore this error if you are inferring rather than training).'
+                         f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
         return inputs, {}
+
+
+
+
+
+
+
+        selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
+        inputs_embeds[selected] = all_vit_embeds.reshape(-1, all_vit_embeds.shape[-1])
+        return {'input_ids': input_ids,
+                'inputs_embeds': inputs_embeds,}
+
+        
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(device=device)
+            vit_embeds = model.extract_feature(pixel_values).to(device=device)  #
+            if torch.any(torch.isnan(vit_embeds)):
+                raise NotSupportError('vit_embeds contain NaN.')
+            selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
+            # input_ids里 每一帧都形如<img> <IMG_CONTEXT>*256 </img> 找出<IMG_CONTEXT>位置替换为vit_embeds
+            inputs_embeds[selected] = vit_embeds.reshape(-1, vit_embeds.shape[-1])
+        elif is_deepspeed_enabled():
+            dummy_pixel_values = torch.zeros((1, 3, 32, 32), device=device, dtype=inputs_embeds.dtype)
+            vit_embeds = model.extract_feature(dummy_pixel_values).to(device=device)
+            inputs_embeds += vit_embeds.mean() * 0.
+        return {'inputs_embeds': inputs_embeds}     # 这里要改为更新inputs_embeds和input_ids 会用这个东西更新kwargs
+
 
     def _ori_encode(self, inputs):
         input_ids = inputs['input_ids']
@@ -2759,88 +2937,6 @@ class HierarInternvl2Template(InternvlTemplate):
                          f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
         return inputs, {}
 
-    def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
-        input_ids, images, text_query_ids = data['input_ids'], data['images'], data['text_query_ids']
-        ori_img_num = len(images)
-
-        # first, get the text embeds to know the device 
-        embedding = model.get_input_embeddings()
-        device = embedding.weight.device
-        inputs_embeds = embedding(input_ids[None])[0].to(device=device)
-
-        # 1. filter shots (need training)
-        shot_list, semantic_indices = model.get_shot_list(images, device)
-        
-        if len(shot_list) >= 6:
-            has_video = True
-            input_size = get_env_args('input_size', int, 448)
-            max_num = get_env_args('max_num', int, 1 if has_video else 12)
-
-            keep_shot_mask = model.filter_shots(images, shot_list, semantic_indices, transform_image, text_query_ids,
-                                                input_size, max_num, device, model.dtype)
-            _images, _sem_indices, _shot_list = [], [], []
-            for i in range(len(keep_shot_mask)):
-                if keep_shot_mask[i] == 1:
-                    s, e = shot_list[i]
-                    _images += images[ s : e + 1 ]
-                    _s, _e = int(len(_images) - (e-s+1)), len(_images) - 1
-                    _shot_list.append( [_s, _e] )
-                    _sem_indices.append( (_s + _e) // 2 )
-            images = _images
-            semantic_indices = torch.tensor(_sem_indices)
-            shot_list = torch.tensor(_shot_list)
-
-        # 2. filter intra-shot (not trainable)
-        pixel_values = [transform_image(image, input_size, max_num) for image in images]
-        num_patches = [pv.shape[0] for pv in pixel_values]
-        pixel_values = torch.cat(pixel_values, dim=0)              # [res1_img_num, 3, input_size=448, input_size]
-        pixel_values = pixel_values.to(self.model.dtype).to(device)
-
-        vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=device) # [res_img_num, 256, vit_dim]
-
-        _vit_embeds = []
-        for i, (l, r) in enumerate(shot_list):
-            if r > l + 1:
-                frames_in_cur_shot = vit_embeds[l : r + 1, :, :]        # [cur_shot_frame_num, 256, vit_dim]
-                seman_in_cur_shot = vit_embeds[ semantic_indices[i] ]   # [256, vit_dim]
-                sim = torch.matmul(frames_in_cur_shot, seman_in_cur_shot.permute(1, 0)) # [cur_shot_frame_num, 256, 256]
-                sim = torch.mean(sim, (1, 2))
-
-                _, keep_frame_indices = torch.topk(sim, k=int((len(sim) + 1) // 2), dim=0, largest=False)
-                keep_frame_indices = torch.sort(keep_frame_indices)[0]
-                
-                keep_frame_indices += l
-                _vit_embeds.append(vit_embeds[keep_frame_indices, :, :])
-            else:
-                _vit_embeds.append(vit_embeds[l : r + 1, :, :])
-        vit_embeds = torch.cat(_vit_embeds, dim=0)  # [res2_img_num, 3, input_size=448, input_size]
-        # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
-        
-        #  <video>  =>  Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img>
-        all_vit_embeds = model.tree_conv_from_vit_embeds(vit_embeds)    # 得到coaser的embeds
-
-        data['images'] = images
-        data = self._ori_encode(data)
-
-        selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
-        inputs_embeds[selected] = all_vit_embeds.reshape(-1, all_vit_embeds.shape[-1])
-        return {'input_ids': input_ids,
-                'inputs_embeds': inputs_embeds,}
-
-        
-        if pixel_values is not None:
-            pixel_values = pixel_values.to(device=device)
-            vit_embeds = model.extract_feature(pixel_values).to(device=device)  #
-            if torch.any(torch.isnan(vit_embeds)):
-                raise NotSupportError('vit_embeds contain NaN.')
-            selected = (input_ids == self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0])
-            # input_ids里 每一帧都形如<img> <IMG_CONTEXT>*256 </img> 找出<IMG_CONTEXT>位置替换为vit_embeds
-            inputs_embeds[selected] = vit_embeds.reshape(-1, vit_embeds.shape[-1])
-        elif is_deepspeed_enabled():
-            dummy_pixel_values = torch.zeros((1, 3, 32, 32), device=device, dtype=inputs_embeds.dtype)
-            vit_embeds = model.extract_feature(dummy_pixel_values).to(device=device)
-            inputs_embeds += vit_embeds.mean() * 0.
-        return {'inputs_embeds': inputs_embeds}     # 这里要改为更新inputs_embeds和input_ids 会用这个东西更新kwargs
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         # 在enumerate(data_iterator)时会调用该函数 对获取到的batch进行处理 Template类的该函数只会保留默认的字段
