@@ -2756,43 +2756,45 @@ class HierarInternvl2Template(InternvlTemplate):
 
         # 原本应该是在_encode里第一步调用Template的_encode时 会插入Frame 1:字样 并把帧的位置设为-100 
         # 因此我们现在手动做这一步 就紧跟在coaser的很多个<IMG_CONTEXT>的后面
-        # image_context = super().replace_tag('image', index, example)    # 调用InternvlTemplate的replace_tag
-        img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)
+        # img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)
         ori_frame_list = []
         for i in range(input_img_num):
-            ori_frame_list += [f'Frame{i + 1}: '] + [img_context_id] * 256 + ['\n'] # 这个末尾有没有\n存疑 明天到InternvlTemplate的replace_tag里看看
-        098670
+            ori_frame_list += [f'Frame{i + 1}: '] + ['<IMG_CONTEXT>'] * 256 + ['\n'] # 这个末尾有没有\n存疑 明天到InternvlTemplate的replace_tag里看看
+        ori_frame_str = ''.join(ori_frame_list)
+        ori_frame_ids, ori_frame_labels, _, _ = super(InternvlTemplate, self)._encode_context_list(ori_frame_str)    # 调用Template类的
+        assert (ori_frame_labels == -100).all()
+
         coaser_end_pos = _findall(input_ids, img_context_id)[-1]  
-        input_ids = input_ids[: coaser_end_pos + 1] + context_list + input_ids[coaser_end_pos + 1 :]      
-        # 以上这一小段还没检查
+        input_ids = input_ids[: coaser_end_pos + 1] + ori_frame_ids + input_ids[coaser_end_pos + 1 :]      
+        labels = labels[: coaser_end_pos + 1] + ori_frame_labels + labels[coaser_end_pos + 1 :]      
         
-        idx_list = _findall(input_ids, -100)    
-        if images:
-            # has_video = bool(example.get('videos')) # 在eval时可能并没有video字段 此时max_num=12 将把每帧转为9个patch 下面num_patch=9
-            has_video = True                          # 目前只做视频的实验 has_video直接置True
-            input_size = get_env_args('input_size', int, 448)
-            max_num = get_env_args('max_num', int, 1 if has_video else 12)
-            pixel_values = [transform_image(image, input_size, max_num) for image in images]
-            num_patches = [pv.shape[0] for pv in pixel_values]
-            pixel_values = torch.cat(pixel_values).to(self.model.dtype)
-        else:
-            pixel_values = None
-            num_patches = []
-        assert len(num_patches) == len(
-            idx_list), f'len(num_patches): {len(num_patches)}, len(idx_list): {len(idx_list)}'
-        added_tokens_len = 0
-        for idx, num_patch in zip(idx_list, num_patches):
-            img_tokens: List[int] = self.tokenizer.encode(
-                '<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * num_patch
-            # 把idx位置的-100 替换为256个<IMG_CONTEXT>
-            input_ids = input_ids[:idx + added_tokens_len] + img_tokens + input_ids[idx + added_tokens_len + 1:]
-            if labels is not None:
-                labels = labels[:idx + added_tokens_len] + [-100] * len(img_tokens) + labels[idx + added_tokens_len
-                                                                                             + 1:]
-            added_tokens_len += len(img_tokens) - 1     # 255 
+        assert input_img_num == pixel_values.shape[0]
+        # idx_list = _findall(input_ids, -100)    
+        # if images:
+        #     # has_video = bool(example.get('videos')) # 在eval时可能并没有video字段 此时max_num=12 将把每帧转为9个patch 下面num_patch=9
+        #     has_video = True                          # 目前只做视频的实验 has_video直接置True
+        #     input_size = get_env_args('input_size', int, 448)
+        #     max_num = get_env_args('max_num', int, 1 if has_video else 12)
+        #     pixel_values = [transform_image(image, input_size, max_num) for image in images]
+        #     num_patches = [pv.shape[0] for pv in pixel_values]
+        #     pixel_values = torch.cat(pixel_values).to(self.model.dtype)
+        # else:
+        #     pixel_values = None
+        #     num_patches = []
+        # assert len(num_patches) == len(
+        #     idx_list), f'len(num_patches): {len(num_patches)}, len(idx_list): {len(idx_list)}'
+        # added_tokens_len = 0
+        # for idx, num_patch in zip(idx_list, num_patches):
+        #     img_tokens: List[int] = self.tokenizer.encode(
+        #         '<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * num_patch
+        #     # 把idx位置的-100 替换为256个<IMG_CONTEXT>
+        #     input_ids = input_ids[:idx + added_tokens_len] + img_tokens + input_ids[idx + added_tokens_len + 1:]
+        #     if labels is not None:
+        #         labels = labels[:idx + added_tokens_len] + [-100] * len(img_tokens) + labels[idx + added_tokens_len
+        #                                                                                      + 1:]
+        #     added_tokens_len += len(img_tokens) - 1     # 255 
         # ...context... Frame1: <img> <IMG_CONTEXT>*256 </img> Frame2: <img> <IMG_CONTEXT>*256 </img> ...context...
 
-        inputs = dict()
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
         # inputs['_data'] = {'input_ids': torch.tensor(input_ids), 'pixel_values': pixel_values}
