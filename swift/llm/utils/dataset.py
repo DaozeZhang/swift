@@ -1132,7 +1132,7 @@ def _preprocess_video_mme(dataset: DATASET_TYPE) -> DATASET_TYPE:
         return {
             'query': d['question'] + '\n' + '\n'.join(d['options']),
             'response': d['answer'],
-            'videos': [os.path.join(video_path, f"{d['videoID']}.mp4")],
+            'videos': os.path.join(video_path, f"{d['videoID']}.mp4"),
         }
 
     return dataset.map(_process).filter(lambda row: row['query'] is not None)
@@ -1166,7 +1166,7 @@ def _preprocess_mlvu(dataset: DATASET_TYPE) -> DATASET_TYPE:
         return {
             'query': 'These are the frames of a video. Select an answer according to the video.\n' + d['question'] + '\n' + '\n'.join(d['candidates']),
             'response': d['answer'],
-            'videos': [os.path.join(f'{video_dir}/{subdirs[subdir]}_{subdir}', f"{video}")],
+            'videos': os.path.join(f'{video_dir}/{subdirs[subdir]}_{subdir}', f"{video}"),
         }
 
     return dataset.map(_process).filter(lambda row: row['query'] is not None)
