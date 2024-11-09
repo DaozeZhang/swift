@@ -187,6 +187,9 @@ class DatasetName:
     llava_video_178k = 'llava-video-178k'
     moviechat_1k_test = 'moviechat-1k-test'
     moviechat_1k_train = 'moviechat-1k-train'
+    video_mme = 'video-mme'
+    mlvu = 'mlvu'
+    mlvu_test = 'mlvu-test'
 
     # rlhf
     hh_rlhf = 'hh-rlhf'
@@ -1113,6 +1116,95 @@ register_dataset(
     _preprocess_moviechat_1k_train,
     get_dataset_from_repo,
     split=['train'],
+    huge_dataset=True,
+    tags=['chat', 'multi-modal', 'video'])
+
+
+def _preprocess_video_mme(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    # 需要手动下载数据集并解压
+    video_path = f'/mnt/nas1/daoze/repo/Video-MME/data'
+    
+    mp4_set = [file[:-4] for file in os.listdir(video_path) if file.endswith('mp4')]
+
+    def _process(d):
+        if d['videoID'] not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        return {
+            'query': d['question'] + '\n' + '\n'.join(d['options']),
+            'response': d['answer'],
+            'videos': [os.path.join(video_path, f"{d['videoID']}.mp4")],
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.video_mme,
+    'lmms-lab/Video-MME',
+    ['videomme'],
+    _preprocess_video_mme,
+    get_dataset_from_repo,
+    split=['test'],
+    huge_dataset=True,
+    tags=['chat', 'multi-modal', 'video'])
+
+
+def _preprocess_mlvu(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    video_dir = '/mnt/nas1/daoze/repo/MLVU/MLVU/video'  # 从本地读视频文件
+    subdirs = {'plotQA': 1, 'needle' : 2, 'ego':3, 'count': 4, 'order': 5, 'anomaly_reco': 6, 'topic_reasoning':7}  # 8和9的列和前面不匹配 去掉
+    mp4_set = []
+    for subdir in subdirs.keys():
+        path = f'{video_dir}/{subdirs[subdir]}_{subdir}'
+        mp4_set += [file for file in os.listdir(path) if file.endswith('mp4')]
+
+    def _process(d):
+        video = d['video']
+        subdir = d['question_type']
+        subdir = 'needle' if subdir == 'findNeedle' else subdir
+        if video not in mp4_set:
+            logger.warn(f'{video} in {subdir} not found. skip the data on this video file.')
+            return {'query': None, 'response': None, 'videos': None} 
+        return {
+            'query': 'These are the frames of a video. Select an answer according to the video.\n' + d['question'] + '\n' + '\n'.join(d['candidates']),
+            'response': d['answer'],
+            'videos': [os.path.join(f'{video_dir}/{subdirs[subdir]}_{subdir}', f"{video}")],
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.mlvu,
+    'DaozeZhang/MLVU_try',  # 读在线的json文件
+    None,
+    _preprocess_mlvu,
+    get_dataset_from_repo,
+    split=['train'],
+    huge_dataset=True,
+    tags=['chat', 'multi-modal', 'video'])
+
+
+def _preprocess_mlvu_test(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    video_path = f'/mnt/nas1/daoze/repo/MLVU_Test/MLVU_Test/video'
+    mp4_set += [file[:-4] for file in os.listdir(video_path) if file.endswith('mp4')]
+
+    def _process(d):
+        if d['videoID'] not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        return {
+            'query': d['question'] + '\n' + '\n'.join(d['options']),
+            'response': d['answer'],
+            'videos': [os.path.join('/mnt/nas1/daoze/repo/MLVU/MLVU/video/1_plotQA', f"{d['videoID']}.mp4")],
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.mlvu_test,
+    # 'AI-ModelScope/MLVU_Test',
+    '/mnt/nas1/daoze/repo/MLVU_Test',
+    None,
+    _preprocess_mlvu_test,
+    get_dataset_from_repo,
+    split=['test'],
     huge_dataset=True,
     tags=['chat', 'multi-modal', 'video'])
 
