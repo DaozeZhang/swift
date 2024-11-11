@@ -27,7 +27,7 @@ from swift.torchacc_utils import pad_and_split_batch
 from swift.utils import get_dist_setting, get_logger, upper_bound, use_torchacc
 from .vision_utils import (load_audio_qwen, load_batch, load_image, load_video_cogvlm2, load_video_internvl,
                            load_video_llava, load_video_minicpmv_mplug_owl3, load_video_qwen2, rescale_image,
-                           transform_image, get_hierar_mask)
+                           transform_image, get_hierar_mask, plot_shot_split)
 from ...hub.errors import NotSupportError
 
 logger = get_logger()
@@ -2689,8 +2689,10 @@ class HierarInternvl2Template(InternvlTemplate):
         if ori_img_num > 60:  # 如果是长视频 要执行镜头分割 镜头筛选与镜内筛选
             # 1. filter shots (need training)
             shot_list, semantic_indices = model.get_shot_list(images, device)
-            
-            if len(shot_list) >= 6:
+
+            # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_split.jpg')
+
+            if len(shot_list) >= 6: # 超过6个视频 才执行镜头筛选
                 has_video = True
                 input_size = get_env_args('input_size', int, 448)
                 max_num = get_env_args('max_num', int, 1 if has_video else 12)
@@ -2708,6 +2710,8 @@ class HierarInternvl2Template(InternvlTemplate):
                 images = _images
                 semantic_indices = torch.tensor(_sem_indices)
                 shot_list = torch.tensor(_shot_list)
+
+            # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_filter.jpg')
 
             # 2. filter intra-shot (not trainable)
             pixel_values = [transform_image(image, input_size, max_num) for image in images]

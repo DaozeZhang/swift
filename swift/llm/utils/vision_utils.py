@@ -169,7 +169,7 @@ def _get_index(bound, fps, max_frame, first_idx=0, num_segments=32):
 
 def transform_image(image, input_size=448, max_num=12):
     transform = _build_transform(input_size=input_size)
-    images = _dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
+    images = _dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num) # resize to input_size
     pixel_values = [transform(image) for image in images]
     pixel_values = torch.stack(pixel_values)
     return pixel_values
@@ -279,6 +279,82 @@ def get_semantic_indices(video, ori_fps, num_segments ):
     seman_indices_in_ori =[round(down_sample) * idx for idx in semantic_indices]
     seman_indices_in_ori = torch.tensor(seman_indices_in_ori)
     return seman_indices_in_ori
+
+def plot_shot_split(images, shot_list, thumbnail_size=(64, 64), save_path='shot.jpg'):
+    """
+    在一个 figure 中批量绘制图像列表，并在每个图像下方标注其索引。
+    如果索引是镜头的开头或结尾，则在标注中注明。
+    字体大小根据缩略图尺寸自适应调整。
+
+    参数：
+    - images: List[PIL.Image]，包含所有图像。
+    - shot_list: torch.Tensor，形如 [num_shots, 2]，每行表示一个镜头的起始和结束索引。
+    - thumbnail_size: Tuple[int, int]，图像缩略图的尺寸（宽, 高）。
+    """
+    import matplotlib.pyplot as plt
+    from PIL import Image
+    import torch
+    import math
+
+    num_images = len(images)
+    
+    # 动态计算网格的列数和行数，尽量接近正方形
+    cols = min(20, math.ceil(math.sqrt(num_images)))  # 根据需要调整最大列数
+    rows = math.ceil(num_images / cols)
+    
+    # 提取所有镜头的起始和结束索引
+    shot_starts = set(shot_list[:, 0].tolist())
+    shot_ends = set(shot_list[:, 1].tolist())
+    
+    # 设置图像的 DPI 和 figure 大小
+    dpi = 150  # 提高 DPI 以增强清晰度
+    fig_width = cols * 1.5  # 每列 1.5 英寸
+    fig_height = rows * 1.5  # 每行 1.5 英寸
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), dpi=dpi)
+    
+    # 如果只有一行或一列，axes 可能不是二维的，统一转换为一维
+    if rows == 1 and cols == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    
+    for idx, ax in enumerate(axes):
+        if idx < num_images:
+            # 获取并缩放图像
+            img = images[idx].resize(thumbnail_size, Image.LANCZOS)
+            ax.imshow(img)
+            ax.axis('off')  # 隐藏坐标轴
+
+            # 准备索引标签和颜色
+            if idx in shot_starts and idx in shot_ends:
+                label = f"{idx} (s,e)"
+                color = 'blue'
+            elif idx in shot_starts:
+                label = f"{idx} (s)"
+                color = 'green'
+            elif idx in shot_ends:
+                label = f"{idx} (e)"
+                color = 'red'
+            else:
+                label = f"{idx}"
+                color = 'black'
+
+            # 计算自适应字体大小
+            desired_font_height = thumbnail_size[1] * 0.12  # 字体高度为缩略图高度的12%
+            fontsize = desired_font_height * 72 / dpi  # 转换为点数
+            fontsize = max(fontsize, 20)  # 设置最小字体大小为20
+
+            # 在图像下方添加索引标签
+            ax.text(0.5, -0.05, label, transform=ax.transAxes, fontsize=fontsize,
+                    color=color, ha='center', va='top',
+                    bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=1))
+        else:
+            ax.axis('off')  # 隐藏未使用的子图
+
+    # 调整布局，确保标签不被裁剪
+    plt.tight_layout()
+    plt.subplots_adjust(bottom=0.1, top=0.95, left=0.02, right=0.98, hspace=0.4)
+    plt.savefig(save_path)
 
 def get_hierar_mask(bottom_size, array_sizes, neibor_size, device, put_coaser_ahead=False):
     """Get the attention mask of PAM-Naive"""
