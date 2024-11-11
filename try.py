@@ -65,12 +65,18 @@ labels[:, 12:] = torch.randint(0, vocab_size, (1, 3))
 # 1表示可以关注，0表示不可以
 mask = torch.zeros(15, 15)
 
-
+# coaser放后面
 mask[0:7, :] = 1    # 0-6可以关注0-6和7-9和10-14
 mask[7:10, 0:10] = 1 # 7-9可以关注0-6和7-9
-mask[10:, 0:7] = 1  # 10-14可以关注0:6和10-14
+mask[10:, 0:7] = 1  # 10-14可以关注0-6和10-14
 mask[10:, 10:] = 1
 # 7-9与10-14不互相关注  already set to 0 by default
+
+# # coaser放前面
+# mask[7:10, :] = 1    # 7-9可以关注0-6和7-9和10-14
+# mask[0:7, 0:10] = 1 # 0-6可以关注0-6和7-9
+# mask[10:, 7:] = 1  # 10-14可以关注7-9和10-14
+# mask[10:, 10:] = 1
 
 def create_lower_triangle_matrix(n):
     matrix = [[0 for _ in range(n)] for _ in range(n)]
@@ -94,13 +100,6 @@ shift_logits = shift_logits.view(-1, vocab_size)
 shift_labels = shift_labels.view(-1).to(shift_logits.device)
 loss_fct = nn.CrossEntropyLoss()
 loss = loss_fct(shift_logits, shift_labels)
-
-
-def hook_fn(grad):
-    print("Gradient flowing through l2:", grad.norm().item())
-
-model.l2.weight.register_hook(hook_fn)
-model.l2.bias.register_hook(hook_fn)
 
 
 loss.backward()
