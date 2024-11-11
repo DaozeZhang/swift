@@ -2825,8 +2825,8 @@ class HierarInternvl2Template(InternvlTemplate):
         inputs_embeds[selected] = all_vit_embeds.reshape(-1, all_vit_embeds.shape[-1])
         inputs['inputs_embeds'] = inputs_embeds
         return inputs 
-        return {'input_ids': input_ids,
-                'inputs_embeds': inputs_embeds,}    # 这里要改为更新inputs_embeds和input_ids 会用这个东西更新kwargs
+        # return {'input_ids': input_ids,
+        #         'inputs_embeds': inputs_embeds,}    # 这里要改为更新inputs_embeds和input_ids 会用这个东西更新kwargs
 
 
     # def _ori_encode(self, inputs):
