@@ -338,10 +338,11 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
 
     use_key_frames = False
     if not use_key_frames:
-        # 如果视频过长 才执行镜头分割 镜头筛选与镜内筛选 此时要密集抽帧并传到后面 比如fps=1
-        if max_frame > 1:   # debug先写个1
-            sec_len = round(max_frame / fps) // 5   # debug除个5
-            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=sec_len)
+        # 如果视频过长 大于2min 才执行镜头分割 镜头筛选与镜内筛选 此时要密集抽帧并传到后面
+        sec_len = round(max_frame / fps)
+        if sec_len > 120:
+            frame_num = sec_len // 2 # 比如按照fps=2抽帧
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frame_num)
         else:
             frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
     else:
@@ -349,9 +350,10 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
         start = time.time()
         frame_indices = get_semantic_indices(vr, fps, num_segments).tolist()
         print(f"Getting semantic indices: {time.time() - start:.2f} sec used.")
-
+    
     images = []
-    for frame_index in frame_indices:
+    from tqdm import tqdm
+    for frame_index in tqdm(frame_indices, desc='loading video'):
         images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
 
     # save_type_str = '_uniform' if not use_key_frames else '_semantic'
