@@ -280,7 +280,219 @@ def get_semantic_indices(video, ori_fps, num_segments ):
     seman_indices_in_ori = torch.tensor(seman_indices_in_ori)
     return seman_indices_in_ori
 
-def get_hierar_mask(bottom_size, array_sizes, neibor_size, device, put_coaser_ahead=False):
+
+def get_q_k(input_size, window_size, stride, device, level_sizes):
+    """
+    Get the index of the key that a given query needs to attend to.
+    第i行表示qi要看的那些k的位置
+    """
+    second_length = input_size // stride
+    second_last = input_size - (second_length - 1) * stride
+    third_start = input_size + second_length
+    third_length = second_length // stride
+    third_last = second_length - (third_length - 1) * stride
+    max_attn = max(second_last, third_last)
+    fourth_start = third_start + third_length
+    fourth_length = third_length // stride
+    full_length = fourth_start + fourth_length
+    fourth_last = third_length - (fourth_length - 1) * stride
+    max_attn = max(third_last, fourth_last)
+
+    max_attn += window_size + 1
+    mask = torch.zeros(full_length, max_attn, dtype=torch.int32, device=device) - 1
+
+    for i in range(input_size):
+        mask[i, 0:window_size] = i + torch.arange(window_size) - window_size // 2
+        mask[i, mask[i] > input_size - 1] = -1
+
+        mask[i, -1] = i // stride + input_size
+        mask[i][mask[i] > third_start - 1] = third_start - 1
+    for i in range(second_length):
+        mask[input_size+i, 0:window_size] = input_size + i + torch.arange(window_size) - window_size // 2
+        mask[input_size+i, mask[input_size+i] < input_size] = -1
+        mask[input_size+i, mask[input_size+i] > third_start - 1] = -1
+
+        if i < second_length - 1:
+            mask[input_size+i, window_size:(window_size+stride)] = torch.arange(stride) + i * stride
+        else:
+            mask[input_size+i, window_size:(window_size+second_last)] = torch.arange(second_last) + i * stride
+
+        mask[input_size+i, -1] = i // stride + third_start
+        mask[input_size+i, mask[input_size+i] > fourth_start - 1] = fourth_start - 1
+    for i in range(third_length):
+        mask[third_start+i, 0:window_size] = third_start + i + torch.arange(window_size) - window_size // 2
+        mask[third_start+i, mask[third_start+i] < third_start] = -1
+        mask[third_start+i, mask[third_start+i] > fourth_start - 1] = -1
+
+        if i < third_length - 1:
+            mask[third_start+i, window_size:(window_size+stride)] = input_size + torch.arange(stride) + i * stride
+        else:
+            mask[third_start+i, window_size:(window_size+third_last)] = input_size + torch.arange(third_last) + i * stride
+
+        mask[third_start+i, -1] = i // stride + fourth_start
+        mask[third_start+i, mask[third_start+i] > full_length - 1] = full_length - 1
+    for i in range(fourth_length):
+        mask[fourth_start+i, 0:window_size] = fourth_start + i + torch.arange(window_size) - window_size // 2
+        mask[fourth_start+i, mask[fourth_start+i] < fourth_start] = -1
+        mask[fourth_start+i, mask[fourth_start+i] > full_length - 1] = -1
+
+        if i < fourth_length - 1:
+            mask[fourth_start+i, window_size:(window_size+stride)] = third_start + torch.arange(stride) + i * stride
+        else:
+            mask[fourth_start+i, window_size:(window_size+fourth_last)] = third_start + torch.arange(fourth_last) + i * stride
+
+    return mask
+
+def get_k_q(q_k_mask):
+    """
+    Get the index of the query that can attend to the given key.
+    第i行表示 能看到ki的那些q的位置 不过这里q的位置指的不是trsfm_attn_mask里的位置
+    """
+    k_q_mask = q_k_mask.clone()
+    for i in range(len(q_k_mask)):
+        for j in range(len(q_k_mask[0])):
+            if q_k_mask[i, j] >= 0:
+                k_q_mask[i, j] = torch.where(q_k_mask[q_k_mask[i, j]] ==i )[0]
+
+    return k_q_mask
+
+# def get_k_q_o1(q_k_mask, device):
+#     """
+#     获取能够关注给定键的查询索引。
+    
+#     参数：
+#     - q_k_mask (torch.Tensor): 形状为 (N, M) 的遮罩张量，其中 N 是查询数量，M 是键数量。
+#                                 q_k_mask[i, j] >= 0 表示查询 i 可以关注键 j，并给出一个关联的查询索引 k。
+    
+#     返回：
+#     - k_q_mask (torch.Tensor): 形状为 (N, M) 的遮罩张量，k_q_mask[i, j] = 查询 k，能够关注键 j，其中 k 是使 q_k_mask[k, *] 包含 i 的查询索引。
+#                             如果不存在这样的查询，则设置为 -1。
+#     """
+#     N, M = q_k_mask.shape
+#     q_k_mask = q_k_mask.to(device)
+
+#     # 创建查询索引矩阵 (N, M)
+#     i_indices = torch.arange(N, device=device).view(N, 1).repeat(1, M)  # shape (N, M)
+#     j_indices = torch.arange(M, device=device).view(1, M).repeat(N, 1)  # shape (N, M)
+
+#     # 获取每个 (i,j) 对应的 k
+#     k = q_k_mask[i_indices, j_indices]  # shape (N, M)
+
+#     # 创建有效 k 的掩码
+#     valid_k_mask = k >= 0  # shape (N, M)
+
+#     # 将无效的 k 设置为 0，避免后续索引错误
+#     k_valid = k.clone()
+#     k_valid[~valid_k_mask] = 0  # shape (N, M)
+
+#     # 创建 l 索引矩阵 (N, M, M)
+#     l_indices = torch.arange(M, device=device).view(1, 1, M).repeat(N, M, 1)  # shape (N, M, M)
+
+#     # 扩展 k_valid 以匹配 l 的维度
+#     k_expanded = k_valid.unsqueeze(-1).expand(-1, -1, M)  # shape (N, M, M)
+
+#     # 获取 q_k_mask[k, l]，即对于每个 (i,j,l)，得到 q_k_mask[k,l]
+#     q_k_at_k_l = q_k_mask[k_expanded, l_indices]  # shape (N, M, M)
+
+#     # 比较 q_k_at_k_l 是否等于 i_indices
+#     i_vals = i_indices.unsqueeze(-1).expand(-1, -1, M)  # shape (N, M, M)
+#     matches = (q_k_at_k_l == i_vals)  # shape (N, M, M), boolean
+
+#     # 转换为整数类型以便后续处理
+#     matches_int = matches.int()  # shape (N, M, M)
+
+#     # 检查每个 (i,j) 是否有匹配的 l
+#     have_match = matches_int.sum(dim=2) > 0  # shape (N, M)
+
+#     # 获取第一个匹配的 l 索引
+#     first_match = torch.argmax(matches_int, dim=2)  # shape (N, M)
+
+#     # 如果有匹配，则保留 first_match，否则设置为 -1
+#     first_match = torch.where(have_match, first_match, torch.full_like(first_match, -1))  # shape (N, M)
+
+#     # 对于无效的 k，强制设置为 -1
+#     first_match = torch.where(valid_k_mask, first_match, torch.full_like(first_match, -1))  # shape (N, M)
+
+#     return first_match
+
+def get_k_q_o1(q_k_mask, device):
+    """
+    获取能够关注给定键的查询索引，优化版使用一次循环并利用向量化操作。
+
+    参数：
+    - q_k_mask (torch.Tensor): 形状为 (N, M) 的遮罩张量，其中 N 是查询数量，M 是键数量。
+                                q_k_mask[i, j] >= 0 表示查询 i 可以关注键 j，并关联到查询 k。
+
+    返回：
+    - k_q_mask (torch.Tensor): 形状为 (N, M) 的遮罩张量，k_q_mask[i, j] = 查询 k，
+                                能够关注键 j，其中 k 是使 q_k_mask[k, l] == i 的键 l 的索引。
+                                如果不存在这样的查询，则设置为 -1。
+    """
+    N, M = q_k_mask.shape
+    q_k_mask = q_k_mask.to(device)
+    dtype = q_k_mask.dtype
+
+    # 初始化 l_map，用于存储每个 k 和 i 的第一个匹配 l 的索引
+    # 如果没有匹配，则设置为 -1
+    l_map = torch.full((N, N), -1, dtype=torch.long, device=device)
+
+    for k in range(N):
+        # 获取查询 k 的所有键 l 的掩码，找出哪些 l 使得 q_k_mask[k, l] == i
+        # 这里 i 是从 0 到 N-1
+        # mask[k, l] == i -> 比较后的 mask 为形状 (N, M)
+        row = q_k_mask[k].unsqueeze(0)  # 形状 (1, M)
+        target_i = torch.arange(N, device=device).unsqueeze(1)  # 形状 (N, 1)
+        mask = (row == target_i)  # 形状 (N, M)，True 表示 q_k_mask[k,l] ==i
+
+        # 使用 torch.where 找到每个 i 的第一个匹配 l
+        # 对于每个 i，找到 mask[i, :] 中第一个为 True 的 l
+        # 如果没有匹配，则保持为 -1
+        # 通过设置无匹配的位置为 M（不可达的最大 l），然后取最小值
+        l_indices = torch.arange(M, device=device).unsqueeze(0).expand(N, M)  # 形状 (N, M)
+        l_indices_masked = torch.where(mask, l_indices, torch.full_like(l_indices, M))  # 保留匹配的 l，其他设为 M
+
+        # 计算每个 i 的最小 l
+        first_l = l_indices_masked.min(dim=1).values  # 形状 (N,)
+
+        # 如果 first_l == M，表示没有匹配，将其设置为 -1
+        first_l = torch.where(first_l < M, first_l, torch.full_like(first_l, -1))
+
+        # 更新 l_map
+        l_map[k] = first_l
+
+    # 现在 l_map[k, i] 为第一个 l 使得 q_k_mask[k, l] == i，或 -1
+
+    # 接下来，对于每个 (i, j)，k = q_k_mask[i, j]
+    # 如果 k >=0，则 k_q_mask[i, j] = l_map[k, i]
+    # 否则，k_q_mask[i, j] = -1
+
+    # 创建 i_indices 和 j_indices
+    i_indices = torch.arange(N, device=device).unsqueeze(1).expand(N, M)  # 形状 (N, M)
+
+    # 获取 k_matrix
+    k_matrix = q_k_mask.clone()  # 形状 (N, M)
+
+    # 创建有效 k 的掩码
+    valid_k_mask = k_matrix >= 0  # 形状 (N, M)
+
+    # 防止 k_matrix 中的值超出范围
+    k_matrix_clamped = torch.clamp(k_matrix, max=N-1)
+
+    # 使用高级索引获取 l_map[k, i]
+    # l_map 的形状为 (N, N)
+    # i_indices 的形状为 (N, M)
+    # k_matrix_clamped 的形状为 (N, M)
+
+    # 扩展 i_indices 的维度以匹配 l_map 的二维索引
+    # 直接索引
+    k_q_mask = l_map[k_matrix_clamped, i_indices]  # 形状 (N, M)
+
+    # 对于无效的 k，设置 k_q_mask 为 -1
+    k_q_mask = torch.where(valid_k_mask, k_q_mask, torch.full_like(k_q_mask, -1))
+
+    return k_q_mask
+
+def get_hierar_mask(bottom_size, array_sizes, neibor_size, device, put_coaser_ahead):
     """Get the attention mask of PAM-Naive"""
     input_size = bottom_size
     window_size = array_sizes

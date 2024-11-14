@@ -27,7 +27,7 @@ from swift.torchacc_utils import pad_and_split_batch
 from swift.utils import get_dist_setting, get_logger, upper_bound, use_torchacc
 from .vision_utils import (load_audio_qwen, load_batch, load_image, load_video_cogvlm2, load_video_internvl,
                            load_video_llava, load_video_minicpmv_mplug_owl3, load_video_qwen2, rescale_image,
-                           transform_image, get_hierar_mask)
+                           transform_image, get_hierar_mask, get_q_k, get_k_q, get_k_q_o1)
 from ...hub.errors import NotSupportError
 
 logger = get_logger()
@@ -2578,7 +2578,8 @@ class HierarInternvl2Template(InternvlTemplate):
         elif media_type == 'video':
             video_segments = get_env_args('video_segments', int, self.video_segments)
             load_video = partial(load_video_internvl, num_segments=video_segments)
-            return _replace_video2image(load_video, example, lambda i: [f'Frame{i + 1}: '] + image_context)
+            # return _replace_video2image(load_video, example, lambda i: [f'Frame{i + 1}: '] + image_context)
+            return _replace_video2image(load_video, example, lambda i: image_context)   # 为了高效实现 去掉Frame i: 不过仍保留\n 
 
     def replace_object(self, index: int, example: Dict[str, Any]) -> List[Context]:
         objects = example.get('objects')
@@ -2611,8 +2612,15 @@ class HierarInternvl2Template(InternvlTemplate):
         input_ids = inputs['input_ids']
         labels = inputs.get('labels')
 
+        # img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False) 
+        # img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False) 
+        # newline_token_id = self.tokenizer.encode('\n', add_special_tokens=False) 
+        # img_sta_pos = _findall(input_ids, img_sta_token_id)[0] # the first <img> 
+
         img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False) 
-        img_sta_pos = _findall(input_ids, img_sta_token_id)[0] # the first <img> 
+        img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
+        newline_token_id = self.tokenizer.encode('\n', add_special_tokens=False) 
+        img_end_pos = _findall(input_ids, img_end_token_id)[-1] # the last </img>
 
         hierar_mode = 'llm_not_use_coasers'
         if hierar_mode == 'llm_use_coasers':
@@ -2638,23 +2646,30 @@ class HierarInternvl2Template(InternvlTemplate):
             res = []
             while cur_level_num > 0:
                 one_coaser_img = \
-                    self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1
+                    img_sta_token_id + \
+                    self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.model.config.frm_token_num * 1 + \
+                    img_end_token_id + newline_token_id
                 res += one_coaser_img * cur_level_num
 
                 i += 1
                 level_sizes.append(cur_level_num)
                 cur_level_num = cur_level_num // 2
 
-        # 找到第一个<img>前面的\n    插入位置是 <|im_end|><|im_start|>user\n [INSERT HERE] Frame1: <img>          
-        i = 1
-        enter_token = self.tokenizer.encode('\n', add_special_tokens=False)[0]
-        while input_ids[img_sta_pos - i] != enter_token: 
-            i += 1
-        insert_pos = img_sta_pos - i
+        # # 找到第一个<img>前面的\n    插入位置是 <|im_end|><|im_start|>user\n [INSERT HERE] Frame1: <img>          
+        # i = 1
+        # enter_token = self.tokenizer.encode('\n', add_special_tokens=False)[0]
+        # while input_ids[img_sta_pos - i] != enter_token: 
+        #     i += 1
+        # insert_pos = img_sta_pos - i
 
-        input_ids = input_ids[:insert_pos + 1] + res + input_ids[insert_pos + 1:]
+        # input_ids = input_ids[:insert_pos + 1] + res + input_ids[insert_pos + 1:]
+        # if labels is not None:
+        #     labels = labels[:insert_pos + 1] + [-100] * len(res) + labels[insert_pos + 1:]
+
+        # 在后面插入
+        input_ids = input_ids[:img_end_pos + 2] + res + input_ids[img_end_pos + 2:]
         if labels is not None:
-            labels = labels[:insert_pos + 1] + [-100] * len(res) + labels[insert_pos + 1:]
+            labels = labels[:img_end_pos + 2] + [-100] * len(res) + labels[img_end_pos + 2:]
 
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
@@ -2698,7 +2713,7 @@ class HierarInternvl2Template(InternvlTemplate):
         added_tokens_len = 0
         for idx, num_patch in zip(idx_list, num_patches):
             img_tokens: List[int] = self.tokenizer.encode(
-                '<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * num_patch
+                '<IMG_CONTEXT>', add_special_tokens=False) * self.model.config.frm_token_num * num_patch
             # 把idx位置的-100 替换为256个<IMG_CONTEXT>
             input_ids = input_ids[:idx + added_tokens_len] + img_tokens + input_ids[idx + added_tokens_len + 1:]
             if labels is not None:
@@ -2719,20 +2734,23 @@ class HierarInternvl2Template(InternvlTemplate):
             import numpy as np
             img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False)
             img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
-            vis_sta = torch.tensor(_findall(input_ids, img_sta_token_id)) + 1
-            vis_end = torch.tensor(_findall(input_ids, img_end_token_id)) - 1   # 闭区间
-            assert all(vis_end - vis_sta + 1 == self.num_image_token)
+            v_sta = torch.tensor(_findall(input_ids, img_sta_token_id))       # 每个原始帧的<img>
+            v_end = torch.tensor(_findall(input_ids, img_end_token_id)) + 1   # 每个原始帧的</img>后的\n  都是闭区间
+            assert all(v_end - v_sta + 1 == self.model.config.frm_token_num + 3)     # 加上<img> </img> \n这三个
 
             coaser_img_num = sum(inputs['level_sizes'][1:])
-            img_end_pos = _findall(input_ids, img_end_token_id)[-1]  # the last </img>
 
-            # 第一个<IMG_CONTEXT>即为插入位置
-            img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)
-            first_coaser_sta = _findall(input_ids, img_context_id)[0]
+            # # 第一个<IMG_CONTEXT>即为插入位置
+            # img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)
+            # first_coaser_sta = _findall(input_ids, img_context_id)[0]
 
-            coaser_sta = torch.tensor([ i * self.num_image_token for i in range(coaser_img_num)]) + first_coaser_sta
-            coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + first_coaser_sta  # 闭区间
-            assert all(coaser_end - coaser_sta + 1 == self.num_image_token)
+            # coaser_sta = torch.tensor([ i * self.num_image_token for i in range(coaser_img_num)]) + first_coaser_sta
+            # coaser_end = torch.tensor([ (i+1) * self.num_image_token - 1 for i in range(coaser_img_num)]) + first_coaser_sta  # 闭区间
+            coaser_sta = v_sta[-coaser_img_num:]
+            coaser_end = v_end[-coaser_img_num:]
+            vis_sta = v_sta[:-coaser_img_num]
+            vis_end = v_end[:-coaser_img_num]
+            # assert all(coaser_end - coaser_sta + 1 == self.num_image_token + 3)
 
             inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
             inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
@@ -2776,37 +2794,90 @@ class HierarInternvl2Template(InternvlTemplate):
         res['coaser_end'] = torch.cat([b['coaser_end'] for b in batch], dim=0)
         res['hierar_mode'] = batch[0]['hierar_mode']
         res['input_ids_bak'] = [b['input_ids_bak'] for b in batch]      # bsz>1则可能无法concat
-        # construct the attention_mask
+        
+        # construct the trsfm_attention_mask
         input_ids = res['input_ids']
-        att_mask = [torch.ones((len(input_ids[i]), len(input_ids[i])), dtype=torch.int64)
-                    for i in range(input_ids.shape[0])]
+        att_mask = [torch.ones((len(input_ids[b]), len(input_ids[b])), dtype=torch.int64)
+                    for b in range(input_ids.shape[0])]
+        
+        _kq_mask_1, _qk_mask_1, _block_mask_2, _block_mask_3 = [], [], [], []
         if res['hierar_mode'] == 'llm_use_coasers':
             ...
         elif res['hierar_mode'] == 'llm_not_use_coasers':
             first_coaser_sta = [b['coaser_sta'][0, 0] for b in batch]
             last_coaser_end = [b['coaser_end'][0, -1] for b in batch]
-            for i in range(len(batch)):
-                att_mask[i][first_coaser_sta[i] : last_coaser_end[i] + 1, :] = 0
-                att_mask[i][:, first_coaser_sta[i] : last_coaser_end[i] + 1] = 0
+            for b in range(len(batch)):
+                att_mask[b][first_coaser_sta[b] : last_coaser_end[b] + 1, :] = 0
+                att_mask[b][:, first_coaser_sta[b] : last_coaser_end[b] + 1] = 0
                 ## set the blocks about videos
                 # first make all the video-video blocks as 0
-                v_sta = torch.cat([ res['coaser_sta'][i, :], res['vis_sta'][i, :] ])
-                v_end = torch.cat([ res['coaser_end'][i, :], res['vis_end'][i, :] ])
+                v_sta = torch.cat([ res['vis_sta'][b, :], res['coaser_sta'][b, :] ])
+                v_end = torch.cat([ res['vis_end'][b, :], res['coaser_end'][b, :] ])
                 for x in range(len(v_sta)):
                     for y in range(len(v_sta)):
-                        att_mask[i][v_sta[x]: v_end[x] + 1, v_sta[y]: v_end[y] + 1] = 0
+                        att_mask[b][v_sta[x]: v_end[x] + 1, v_sta[y]: v_end[y] + 1] = 0
                 # then set the valid video-video blocks as 1 according to the ref
-                ref_mask, level_sizes = get_hierar_mask(bottom_size=res['vis_sta'][i].shape[0], array_sizes=[2,2,2],
-                                                        neibor_size=5, device='cpu', put_coaser_ahead=True)
+                bottom_size = res['vis_sta'][b].shape[0]
+                array_sizes = [self.model.config.array_num] * 3
+                neibor_size = 5
+                ref_mask, level_sizes = get_hierar_mask(bottom_size=bottom_size, array_sizes=array_sizes,
+                                                        neibor_size=neibor_size, device='cpu', put_coaser_ahead=False)
                 all_x, all_y = torch.where(ref_mask==1)
                 for x, y in zip(all_x, all_y):
-                    att_mask[i][ v_sta[x] : v_end[x] + 1, v_sta[y] : v_end[y] + 1 ] = 1
+                    att_mask[b][ v_sta[x] : v_end[x] + 1, v_sta[y] : v_end[y] + 1 ] = 1
+                # 至此 att_mask即为batch内第b个样本的trsfm_att_mask
+
+                # 按照1\2\3把trsfm_att_mask分割 
+                seq_len = input_ids.shape[1]
+                up_context_len, down_context_len = v_sta[0], seq_len-1 - v_end[-1]
+                level_sizes = batch[b]['level_sizes']
+                ori_len, coaser_len = level_sizes[0], sum(level_sizes[1:])
+                unit = self.model.config.frm_token_num + 3  # 一个视频帧一共要unit个token
+                # 对于2和3：先AND下三角阵，再分割出来即可
+                block_mask_2 = torch.cat([
+                    torch.tril(torch.ones((up_context_len, up_context_len))),
+                    torch.ones((ori_len * unit, up_context_len)),
+                    torch.zeros((coaser_len * unit, up_context_len)),
+                ], dim=0).int()
+
+                block_mask_3 = torch.cat([
+                    torch.ones((down_context_len, up_context_len + ori_len * unit)),
+                    torch.zeros((down_context_len, coaser_len * unit)),
+                    torch.tril(torch.ones((down_context_len, down_context_len))),
+                ], dim=1).int()
+
+                _block_mask_2.append(block_mask_2)
+                _block_mask_3.append(block_mask_3)
+
+                # 对于1：不AND下三角阵 分割出后 还要构造 qk_mask & kq_mask 以使用TVM
+                ref_qk_mask = get_q_k(bottom_size, neibor_size, array_sizes[0], 'cpu', 
+                                      level_sizes=level_sizes) # 第i行表示qi要看的那些k的位置 按照左邻-自己-右邻-左子-右子-父顺序
+
+                full_len, stacked_len = ref_qk_mask.shape
+                assert full_len == ori_len + coaser_len
+
+                qk_mask_1 = torch.zeros((full_len * unit, stacked_len * unit)).int() - 1
+                for i in range(full_len):
+                    for j in range(stacked_len):
+                        if ref_qk_mask[i][j] >= 0:
+                            # 给qk_mask的i,j所对应的那个unit*unit方格填入索引
+                            k_idx = ref_qk_mask[i][j]
+                            qk_mask_1[i*unit : (i+1)*unit, j*unit : (j+1)*unit] = torch.arange(v_sta[k_idx], v_end[k_idx] + 1) - up_context_len   # TVM的那个分块矩阵 它是单独做注意力的 索引也要去掉上文
+                            # qk_mask_1[i*unit : (i+1)*unit, j*unit : (j+1)*unit] = torch.arange(k_idx * unit, (k_idx + 1) * unit)  # 与上一行等价
+
+                kq_mask_1 = get_k_q_o1(qk_mask_1, device='cuda')
+
+                _qk_mask_1.append(qk_mask_1.to('cpu'))
+                _kq_mask_1.append(kq_mask_1.to('cpu'))
+            
             res['trsfm_att_mask'] = torch.stack(att_mask, dim=0)
 
-        # # !!!!试一试让coaser部分全为1 看看会不会让tree_conv中 七个之前的模块有梯度
-        # sta, end = batch[0]['coaser_sta'][0][0], batch[0]['coaser_end'][0][3]
-        # # res['trsfm_att_mask'][:, sta : end + 1, : ] = 1    # debug 只考虑bsz=1情况 横向
-        # res['trsfm_att_mask'][:, last_coaser_end[0] + 1 :, sta : end + 1 ] = 1   # 纵向
+            res['mask_info'] = dict()
+            res['mask_info']['use_tvm'] = True
+            res['mask_info']['qk_mask_1'] = torch.stack(_qk_mask_1, dim=0)
+            res['mask_info']['kq_mask_1'] = torch.stack(_kq_mask_1, dim=0)
+            res['mask_info']['block_mask_2'] = torch.stack(_block_mask_2, dim=0)
+            res['mask_info']['block_mask_3'] = torch.stack(_block_mask_3, dim=0)
 
         return res
 
