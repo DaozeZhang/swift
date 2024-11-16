@@ -2845,6 +2845,8 @@ class HierarInternvl2Template(InternvlTemplate):
                     torch.zeros((down_context_len, coaser_len * unit)),
                     torch.tril(torch.ones((down_context_len, down_context_len))),
                 ], dim=1).int()
+                block_mask_2 = torch.where(block_mask_2 == 1, torch.tensor(0.0), torch.tensor(float('-inf')))
+                block_mask_3 = torch.where(block_mask_3 == 1, torch.tensor(0.0), torch.tensor(float('-inf')))
 
                 _block_mask_2.append(block_mask_2)
                 _block_mask_3.append(block_mask_3)
@@ -2873,7 +2875,7 @@ class HierarInternvl2Template(InternvlTemplate):
             res['trsfm_att_mask'] = torch.stack(att_mask, dim=0)
 
             res['mask_info'] = dict()
-            res['mask_info']['use_tvm'] = True
+            res['mask_info']['use_tvm'] = False
             res['mask_info']['qk_mask_1'] = torch.stack(_qk_mask_1, dim=0)
             res['mask_info']['kq_mask_1'] = torch.stack(_kq_mask_1, dim=0)
             res['mask_info']['block_mask_2'] = torch.stack(_block_mask_2, dim=0)
