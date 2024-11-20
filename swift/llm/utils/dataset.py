@@ -1269,7 +1269,7 @@ register_dataset(
 
 
 def _preprocess_lvbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
-    video_path = f'/mnt/nas1/daoze/repo/VNBench-data/VNBench_new/'
+    video_path = f''    # 要用他的脚本或自己写脚本下载视频
     mp4_set += [file for file in os.listdir(video_path) if file.endswith('mp4')]
 
     def _process(d):
@@ -1287,10 +1287,10 @@ def _preprocess_lvbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
 register_dataset(
     DatasetName.lvbench,
     'AI-ModelScope/LVBench',
-    None,
+    ['lvbench'],
     _preprocess_lvbench,
     get_dataset_from_repo,
-    split=['train'],
+    split=['test'],
     huge_dataset=False,
     tags=['chat', 'multi-modal', 'video'])
 
