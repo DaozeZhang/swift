@@ -190,6 +190,9 @@ class DatasetName:
     video_mme = 'video-mme'
     mlvu = 'mlvu'
     mlvu_test = 'mlvu-test'
+    long_video_bench = 'long-video-bench'
+    vnbench = 'vn-bench'
+    lvbench = 'lv-bench'
 
     # rlhf
     hh_rlhf = 'hh-rlhf'
@@ -1207,6 +1210,90 @@ register_dataset(
     split=['test'],
     huge_dataset=True,
     tags=['chat', 'multi-modal', 'video'])
+
+
+# 等long_video_bench搬到ms再写
+# def _preprocess_long_video_bench(dataset: DATASET_TYPE) -> DATASET_TYPE:
+#     video_path = f'/mnt/nas1/daoze/repo/xxx/video'
+#     mp4_set += [file[:-4] for file in os.listdir(video_path) if file.endswith('mp4')]
+
+#     def _process(d):
+#         if d['videoID'] not in mp4_set:
+#             return {'query': None, 'response': None, 'videos': None}
+#         return {
+#             'query': d['question'] + '\n' + '\n'.join(d['options']),
+#             'response': d['answer'],
+#             'videos': [os.path.join('/mnt/nas1/daoze/repo/MLVU/MLVU/video/1_plotQA', f"{d['videoID']}.mp4")],
+#         }
+
+#     return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+# register_dataset(
+#     DatasetName.long_video_bench,
+#     # 'AI-ModelScope/LongVideoBench',
+#     '/mnt/nas1/daoze/repo/xxx',
+#     None,
+#     _preprocess_long_video_bench,
+#     get_dataset_from_repo,
+#     split=['test'],
+#     huge_dataset=True,
+#     tags=['chat', 'multi-modal', 'video'])
+
+
+def _preprocess_vnbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    video_path = f'/mnt/nas1/daoze/repo/VNBench-data/VNBench_new/'
+    mp4_set += [file for file in os.listdir(video_path) if file.endswith('mp4')]
+
+    def _process(d):
+        video_name = d['video'].split('/')[-1]
+        if video_name not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        return {
+            'query': d['question'] + '\n' + '\n'.join(d['options']),
+            'response': d['gt_option'],
+            'videos': [os.path.join(video_path, video_name)],
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.vnbench,
+    'AI-ModelScope/VNBench',
+    # '/mnt/nas1/daoze/repo/xxx',
+    ['vnbench'],
+    _preprocess_vnbench,
+    get_dataset_from_repo,
+    split=['test'],
+    huge_dataset=False,
+    tags=['chat', 'multi-modal', 'video'])
+
+
+def _preprocess_lvbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    video_path = f'/mnt/nas1/daoze/repo/VNBench-data/VNBench_new/'
+    mp4_set += [file for file in os.listdir(video_path) if file.endswith('mp4')]
+
+    def _process(d):
+        video_name = d['video'].split('/')[-1]
+        if video_name not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        return {
+            'query': d['question'] + '\n' + '\n'.join(d['options']),
+            'response': d['gt_option'],
+            'videos': [os.path.join(video_path, video_name)],
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.lvbench,
+    'AI-ModelScope/LVBench',
+    None,
+    _preprocess_lvbench,
+    get_dataset_from_repo,
+    split=['train'],
+    huge_dataset=False,
+    tags=['chat', 'multi-modal', 'video'])
+
 
 
 def _preprocess_activitynetqa(dataset: DATASET_TYPE) -> DATASET_TYPE:
