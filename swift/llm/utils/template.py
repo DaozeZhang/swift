@@ -2568,8 +2568,19 @@ register_template(TemplateType.internvl2_phi3, Internvl2Phi3Template(), use_mode
 
 
 class HierarInternvl2Template(InternvlTemplate):
-    video_segments = 16
+    # video_segments = 16
     system = '你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。'
+
+    def replace_tag(self, media_type, index, example) -> List[Context]:
+        image_context = super().replace_tag('image', index, example)
+        if media_type == 'image':
+            return image_context
+        elif media_type == 'video':
+            video_index = example['video_index']
+            video = example['videos'][video_index]
+            example['images'] = load_video_internvl(video)  # load出所有帧 以备_post_encode()中筛选
+            context_list = ['<IMG_CONTEXT>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造 用一个<IMG_CONTEXT>代替
+            return context_list
 
     def replace_object(self, index: int, example: Dict[str, Any]) -> List[Context]:
         objects = example.get('objects')
@@ -2598,17 +2609,6 @@ class HierarInternvl2Template(InternvlTemplate):
         else:
             return ['<bbox>']
 
-    def replace_tag(self, media_type, index, example) -> List[Context]:
-        image_context = super().replace_tag('image', index, example)
-        if media_type == 'image':
-            return image_context
-        elif media_type == 'video':
-            video_index = example['video_index']
-            video = example['videos'][video_index]
-            example['images'] = load_video_internvl(video)  # load出所有帧 以备_post_encode()中筛选
-            context_list = ['<IMG_CONTEXT>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造 用一个<IMG_CONTEXT>代替
-            return context_list
-
     def _encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         inputs, _ = super(InternvlTemplate, self)._encode(example)
         try:
@@ -2626,7 +2626,7 @@ class HierarInternvl2Template(InternvlTemplate):
                            'videos': example['videos']}    # 在调用层 会把_data送入post_encode
         return inputs, {}
 
-    def insert_coaser_img(self, inputs, nframes):    # 将唯一的一个<IMG_CONTEXT>替换为很多<IMG_CONTEXT>
+    def insert_coaser_img(self, inputs, nframes):    # 将唯一的一个<IMG_CONTEXT>替换
         input_ids = inputs['input_ids']
         labels = inputs.get('labels')
         if isinstance(input_ids, torch.Tensor):
@@ -2637,6 +2637,10 @@ class HierarInternvl2Template(InternvlTemplate):
         assert len(vid_pos) == 1
         vid_pos = vid_pos[0]
         array_num = self.model.config.array_num
+
+        img_sta_token_id = self.tokenizer.encode('<img>', add_special_tokens=False) 
+        img_end_token_id = self.tokenizer.encode('</img>', add_special_tokens=False)
+        newline_token_id = self.tokenizer.encode('\n', add_special_tokens=False) 
 
         hierar_mode = 'llm_not_use_coasers'
         if hierar_mode == 'llm_use_coasers':
@@ -2662,7 +2666,9 @@ class HierarInternvl2Template(InternvlTemplate):
             res = []
             for i in range(3):
                 one_coaser_img = \
-                    self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1
+                    img_sta_token_id + \
+                    self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False) * self.num_image_token * 1 + \
+                    img_end_token_id + newline_token_id
                 res += one_coaser_img * cur_level_num
 
                 level_sizes.append(cur_level_num)
@@ -2963,7 +2969,82 @@ class HierarInternvl2Template(InternvlTemplate):
                 all_x, all_y = torch.where(ref_mask==1)
                 for x, y in zip(all_x, all_y):
                     att_mask[i][ v_sta[x] : v_end[x] + 1, v_sta[y] : v_end[y] + 1 ] = 1
+                # 至此 att_mask即为batch内第b个样本的trsfm_att_mask
+
+                if self.model.config.use_tvm:
+                    # 按照1\2\3把trsfm_att_mask分割 
+                    seq_len = input_ids.shape[1]
+                    up_context_len, down_context_len = v_sta[0], seq_len-1 - v_end[-1]
+                    level_sizes = batch[b]['level_sizes']
+                    ori_len, coaser_len = level_sizes[0], sum(level_sizes[1:])
+                    unit = self.model.config.frm_token_num + 3  # 一个视频帧一共要unit个token
+                    # 对于2和3：先AND下三角阵，再分割出来即可
+                    block_mask_2 = torch.cat([
+                        torch.tril(torch.ones((up_context_len, up_context_len))),
+                        torch.ones((ori_len * unit, up_context_len)),
+                        torch.zeros((coaser_len * unit, up_context_len)),
+                    ], dim=0).int()
+
+                    block_mask_3 = torch.cat([
+                        torch.ones((down_context_len, up_context_len + ori_len * unit)),
+                        torch.zeros((down_context_len, coaser_len * unit)),
+                        torch.tril(torch.ones((down_context_len, down_context_len))),
+                    ], dim=1).int()
+                    block_mask_2 = torch.where(block_mask_2 == 1, torch.tensor(0.0), torch.tensor(float('-inf')))
+                    block_mask_3 = torch.where(block_mask_3 == 1, torch.tensor(0.0), torch.tensor(float('-inf')))
+
+                    _block_mask_2.append(block_mask_2)
+                    _block_mask_3.append(block_mask_3)
+
+                    # 对于1：不AND下三角阵 分割出后 还要构造 qk_mask & kq_mask 以使用TVM
+                    # 这个两个mask的结构只和几个树的结构参数有关 所以可以存储从而加速计算
+                    saved_mask_info_path = f'/mnt/nas1/daoze/code/hierar_internvl2/saved_mask_info/{level_sizes}_{array_sizes}_{neibor_size}_{unit}_'
+                    if not (os.path.exists(saved_mask_info_path + 'qk_mask_1.tensor') and \
+                            os.path.exists(saved_mask_info_path + 'kq_mask_1.tensor') ):
+                        ref_qk_mask = get_q_k(bottom_size, neibor_size, array_sizes[0], 'cpu', 
+                                                level_sizes=level_sizes) # 第i行表示qi要看的那些k的位置 按照左邻-自己-右邻-左子-右子-父顺序
+
+                        full_len, stacked_len = ref_qk_mask.shape
+                        assert full_len == ori_len + coaser_len
+
+                        qk_mask_1 = torch.zeros((full_len * unit, stacked_len * unit)).int() - 1
+                        for i in range(full_len):
+                            for j in range(stacked_len):
+                                if ref_qk_mask[i][j] >= 0:
+                                    # 给qk_mask的i,j所对应的那个unit*unit方格填入索引
+                                    k_idx = ref_qk_mask[i][j]
+                                    # qk_mask_1[i*unit : (i+1)*unit, j*unit : (j+1)*unit] = torch.arange(v_sta[k_idx], v_end[k_idx] + 1) - up_context_len   # TVM的那个分块矩阵 它是单独做注意力的 索引也要去掉上文
+                                    qk_mask_1[i*unit : (i+1)*unit, j*unit : (j+1)*unit] = torch.arange(k_idx * unit, (k_idx + 1) * unit)  # 与上一行等价
+
+                        kq_mask_1 = get_k_q_o1(qk_mask_1, device='cpu').to(torch.int32) # 这个太慢了！！！！
+
+                        torch.save(qk_mask_1, saved_mask_info_path + 'qk_mask_1.tensor')
+                        torch.save(kq_mask_1, saved_mask_info_path + 'kq_mask_1.tensor')
+                    else:
+                        qk_mask_1 = torch.load(saved_mask_info_path + 'qk_mask_1.tensor')
+                        kq_mask_1 = torch.load(saved_mask_info_path + 'kq_mask_1.tensor')
+
+                    _qk_mask_1.append(qk_mask_1.to('cpu'))
+                    _kq_mask_1.append(kq_mask_1.to('cpu'))
+            
             res['trsfm_att_mask'] = torch.stack(att_mask, dim=0)
+
+            res['mask_info'] = dict()
+            res['mask_info']['use_tvm'] = self.model.config.use_tvm
+            if self.model.config.use_tvm:
+                res['mask_info']['qk_mask_1'] = torch.stack(_qk_mask_1, dim=0)
+                res['mask_info']['kq_mask_1'] = torch.stack(_kq_mask_1, dim=0)
+                res['mask_info']['block_mask_2'] = torch.stack(_block_mask_2, dim=0)
+                res['mask_info']['block_mask_3'] = torch.stack(_block_mask_3, dim=0)
+
+                pass_func = self.model.config.pass_func and self.model.config.use_tvm
+                if not pass_func:
+                    res['mask_info']['tvm_func'] = None
+                else:
+                    res['mask_info']['tvm_func'] = self.model.tvm_func
+                res['mask_info']['pass_func'] = pass_func
+                res['mask_info']['padding'] = torch.full((1, 32, up_context_len, res['mask_info']['kq_mask_1'].shape[-1]), 
+                                                          float('-inf'), device='cpu', dtype=torch.float32)
 
         return res
 
