@@ -607,27 +607,37 @@ class SwiftMixin:
 
             optimizer_grouped_parameters = [    # pytorch的规则: 未在字典中的参数将用默认配置 即由optimizer_kwargs决定
                     {
+                        'params': [p for n, p in opt_model.mlp_compress.named_parameters() if (f'mlp_compress.{n}' in decay_parameters and p.requires_grad)],
+                        'weight_decay': self.args.weight_decay,
+                        'lr': optimizer_kwargs['lr'] * 30,
+                    },
+                    {
+                        'params': [p for n, p in opt_model.mlp_compress.named_parameters() if (f'mlp_compress.{n}' not in decay_parameters and p.requires_grad)],
+                        'weight_decay': 0.0,
+                        'lr': optimizer_kwargs['lr'] * 30,
+                    },
+                    {
                         'params': [p for n, p in opt_model.tree_conv.named_parameters() if (f'tree_conv.{n}' in decay_parameters and p.requires_grad)],
                         'weight_decay': self.args.weight_decay,
-                        'lr': optimizer_kwargs['lr'],
+                        'lr': optimizer_kwargs['lr'] * 30,
                     },
                     {
                         'params': [p for n, p in opt_model.tree_conv.named_parameters() if (f'tree_conv.{n}' not in decay_parameters and p.requires_grad)],
                         'weight_decay': 0.0,
-                        'lr': optimizer_kwargs['lr'],
+                        'lr': optimizer_kwargs['lr'] * 30,
                     },
                     {
                         'params': [p for n, p in opt_model.language_model.named_parameters() if (f'language_model.{n}' in decay_parameters and p.requires_grad)],
                         'weight_decay': self.args.weight_decay,
-                        'lr': optimizer_kwargs['lr'] / 5,
+                        'lr': optimizer_kwargs['lr'],
                     },
                     {
                         'params': [p for n, p in opt_model.language_model.named_parameters() if (f'language_model.{n}' not in decay_parameters and p.requires_grad)],
                         'weight_decay': 0.0,
-                        'lr': optimizer_kwargs['lr'] / 5,   # 其实language_model的参数都要做decay 所以这里参数为空列表
+                        'lr': optimizer_kwargs['lr'],   # 其实language_model的参数都要做decay 所以这里参数为空列表
                     },
                 ]
-                
+
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
