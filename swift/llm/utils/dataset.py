@@ -1212,37 +1212,112 @@ register_dataset(
     tags=['chat', 'multi-modal', 'video'])
 
 
-# 等long_video_bench搬到ms再写
-# def _preprocess_long_video_bench(dataset: DATASET_TYPE) -> DATASET_TYPE:
-#     video_path = f'/mnt/nas1/daoze/repo/xxx/video'
-#     mp4_set += [file[:-4] for file in os.listdir(video_path) if file.endswith('mp4')]
 
-#     def _process(d):
-#         if d['videoID'] not in mp4_set:
-#             return {'query': None, 'response': None, 'videos': None}
-#         return {
-#             'query': d['question'] + '\n' + '\n'.join(d['options']),
-#             'response': d['answer'],
-#             'videos': [os.path.join('/mnt/nas1/daoze/repo/MLVU/MLVU/video/1_plotQA', f"{d['videoID']}.mp4")],
-#         }
+def get_dataset_long_video_bench(dataset_id: str,
+                                 subsets: Optional[List[str]],
+                                 preprocess_func: PreprocessFunc,
+                                 split: List[str],
+                                 dataset_sample: int = -1,
+                                 *,
+                                 random_state: Optional[RandomState] = None,
+                                 dataset_test_ratio: float = 0.,
+                                 remove_useless_columns: bool = True,
+                                 use_hf: bool = False,
+                                 **kwargs) -> Tuple[DATASET_TYPE, Optional[DATASET_TYPE]]:
+    streaming = kwargs.get('streaming', False)
+    assert streaming is False, 'This dataset are only used by yourself and not support streaming.'
+    if subsets is None:
+        subsets = []
+    assert len(split) > 0
+    if len(subsets) == 0:
+        subset_split_list = split
+    else:
+        subset_split_list = list(itertools.product(subsets, split))
+    
+    from longvideobench import LongVideoBenchDataset
+    dataset = LongVideoBenchDataset('/mnt/nas1/daoze/repo/LongVideoBench', "lvb_val.json", max_num_frames=1)    # 这个类默认会直接load出若干帧和问题和答案 并组织在一个list里 但我们希望分开处理 因此max_num_frames随便写个1
+    # dataset = LongVideoBenchDataset('/mnt/nas1/daoze/repo/LongVideoBench', "lvb_test_wo_gt.json", max_num_frames=1)
+    
+    from PIL import Image
+    dict_list = [{
+            'query': '\n'.join(dataset[i]['inputs'][1:]) if isinstance(dataset[i]['inputs'][0], Image.Image)
+                    else '\n'.join(e for e in dataset[i]['inputs'] if not isinstance(e, Image.Image)),
+            'response': dataset[i]['correct_choice'],
+            'id': dataset[i]['id']
+        } for i in tqdm(range(0, 100), desc='extracting long video bench...')]
+    
+    import pandas as pd
+    hf_dataset = HfDataset.from_pandas(pd.DataFrame(dict_list))
 
-#     return dataset.map(_process).filter(lambda row: row['query'] is not None)
+    return _post_preprocess(hf_dataset, dataset_sample, random_state, preprocess_func, dataset_test_ratio,
+                            remove_useless_columns, **kwargs)
 
-# register_dataset(
-#     DatasetName.long_video_bench,
-#     # 'AI-ModelScope/LongVideoBench',
-#     '/mnt/nas1/daoze/repo/xxx',
-#     None,
-#     _preprocess_long_video_bench,
-#     get_dataset_from_repo,
-#     split=['test'],
-#     huge_dataset=True,
-#     tags=['chat', 'multi-modal', 'video'])
+def _preprocess_long_video_bench(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    video_path = f'/mnt/nas1/daoze/repo/LongVideoBench/videos'
+    mp4_set = [file[:-4] for file in os.listdir(video_path) if file.endswith('mp4')]
 
+    def _process(d):
+        videos = d['id'].split('_')[0]
+        if videos not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        return {
+            'query': d['query'],
+            'response': d['response'],
+            'videos': [os.path.join(video_path, f"{videos}.mp4")],
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.long_video_bench,
+    # 'AI-ModelScope/LongVideoBench',
+    '/mnt/nas1/daoze/repo/LongVideoBench',
+    None,
+    _preprocess_long_video_bench,
+    get_dataset_long_video_bench,
+    split=['validation'],
+    huge_dataset=True,
+    tags=['chat', 'multi-modal', 'video'])
+
+
+def get_dataset_vnbench(dataset_id: str,
+                        subsets: Optional[List[str]],
+                        preprocess_func: PreprocessFunc,
+                        split: List[str],
+                        dataset_sample: int = -1,
+                        *,
+                        random_state: Optional[RandomState] = None,
+                        dataset_test_ratio: float = 0.,
+                        remove_useless_columns: bool = True,
+                        use_hf: bool = False,
+                        **kwargs) -> Tuple[DATASET_TYPE, Optional[DATASET_TYPE]]:
+    streaming = kwargs.get('streaming', False)
+    assert streaming is False, 'This dataset are only used by yourself and not support streaming.'
+    if subsets is None:
+        subsets = []
+    assert len(split) > 0
+    if len(subsets) == 0:
+        subset_split_list = split
+    else:
+        subset_split_list = list(itertools.product(subsets, split))
+        
+    json_path = '/mnt/nas1/daoze/repo/VNBench-main-4try.json'
+    with open(json_path, 'r', encoding='utf-8') as file:
+        dict_list = json.load(file)
+
+    import pandas as pd
+    df = pd.DataFrame(dict_list)
+    df['options'] = df['options'].apply(lambda x: list(map(str, x)))
+    df['gt'] = df['gt'].astype(str)
+
+    hf_dataset = HfDataset.from_pandas(df)
+
+    return _post_preprocess(hf_dataset, dataset_sample, random_state, preprocess_func, dataset_test_ratio,
+                            remove_useless_columns, **kwargs)
 
 def _preprocess_vnbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
     video_path = f'/mnt/nas1/daoze/repo/VNBench-data/VNBench_new/'
-    mp4_set += [file for file in os.listdir(video_path) if file.endswith('mp4')]
+    mp4_set = [file for file in os.listdir(video_path) if file.endswith('mp4')]
 
     def _process(d):
         video_name = d['video'].split('/')[-1]
@@ -1258,18 +1333,17 @@ def _preprocess_vnbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
 
 register_dataset(
     DatasetName.vnbench,
-    'AI-ModelScope/VNBench',
-    # '/mnt/nas1/daoze/repo/xxx',
+    'not_important',
     ['vnbench'],
     _preprocess_vnbench,
-    get_dataset_from_repo,
+    get_dataset_vnbench,
     split=['test'],
     huge_dataset=False,
     tags=['chat', 'multi-modal', 'video'])
 
 
 def _preprocess_lvbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
-    video_path = f''    # 要用他的脚本或自己写脚本下载视频
+    video_path = f''    # 从AI-ModelScope/LVBench-data下载视频文件
     mp4_set += [file for file in os.listdir(video_path) if file.endswith('mp4')]
 
     def _process(d):
