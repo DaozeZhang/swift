@@ -1343,31 +1343,38 @@ register_dataset(
 
 
 def _preprocess_lvbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
-    video_path = f''    # 从AI-ModelScope/LVBench-data下载视频文件
-    mp4_set += [file for file in os.listdir(video_path) if file.endswith('mp4')]
+    video_path = f'/mnt/nas1/daoze/repo/LVBench-data/all_videos'
+    mp4_set = [file for file in os.listdir(video_path) if file.endswith('mp4')]
 
-    def _process(d):
-        video_name = d['video'].split('/')[-1]
-        if video_name not in mp4_set:
-            return {'query': None, 'response': None, 'videos': None}
-        return {
-            'query': d['question'] + '\n' + '\n'.join(d['options']),
-            'response': d['gt_option'],
-            'videos': [os.path.join(video_path, video_name)],
-        }
+    def _process(batch):    # bsz==1
+        video_name = batch['key'][0]
+        file_path = os.path.join(f'/mnt/nas1/daoze/repo/LVBench-data/all_videos', f'{video_name}.mp4')
+        if not os.path.exists(file_path):
+            return {"res": [{'query': None, 'response': None, 'videos': None}]}
+        res = []
+        for qa in batch["qa"][0]:
+            res.append( {
+                'query': qa['question'],
+                'response': qa['answer'],
+                'videos': file_path,
+            } )
+        return {"res": res}
 
-    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+    dict_list = dataset.map(_process, batched=True, batch_size=1, remove_columns=dataset.column_names)['res']
+    import pandas as pd
+    hf_dataset = HfDataset.from_pandas(pd.DataFrame(dict_list)).filter(lambda row: row['videos'] is not None)
+    return hf_dataset
 
 register_dataset(
     DatasetName.lvbench,
-    'AI-ModelScope/LVBench',
+    # 'AI-ModelScope/LVBench',
+    '/mnt/nas1/daoze/repo/LVBench',
     ['lvbench'],
     _preprocess_lvbench,
     get_dataset_from_repo,
     split=['test'],
     huge_dataset=False,
     tags=['chat', 'multi-modal', 'video'])
-
 
 
 def _preprocess_activitynetqa(dataset: DATASET_TYPE) -> DATASET_TYPE:
