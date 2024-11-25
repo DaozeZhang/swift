@@ -628,7 +628,7 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
         # 如果视频过长 大于2min 才执行镜头分割 镜头筛选与镜内筛选 此时要密集抽帧并传到后面
         sec_len = round(max_frame / fps)
         if sec_len > 120:
-            frame_num = sec_len // 2 # 比如按照fps=2抽帧
+            frame_num = sec_len // 4 # 比如按照fps=4抽帧
             frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frame_num)
         else:
             frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
@@ -640,7 +640,7 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     
     images = []
     from tqdm import tqdm
-    for frame_index in tqdm(frame_indices, desc='loading video'):
+    for frame_index in tqdm(frame_indices, desc='loading video', disable=True):
         images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
 
     # save_type_str = '_uniform' if not use_key_frames else '_semantic'

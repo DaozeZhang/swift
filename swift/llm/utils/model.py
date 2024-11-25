@@ -4789,7 +4789,7 @@ def get_model_tokenizer_internvl(model_dir: str,
 
 @register_model(
     ModelType.hierar_internvl2_2b,
-    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B',
+    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B-tvm',
     LoRATM.internvl,
     TemplateType.hierar_internvl2,
     requires=['transformers>=4.36', 'timm'],
@@ -4802,7 +4802,7 @@ def get_model_tokenizer_internvl(model_dir: str,
     hf_model_id='OpenGVLab/InternVL2-2B')
 @register_model(
     ModelType.hierar_internvl2_8b,
-    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-8B',
+    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-8B-tvm',
     LoRATM.internvl,
     TemplateType.hierar_internvl2,
     requires=['transformers>=4.36', 'timm'],
