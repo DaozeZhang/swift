@@ -4787,6 +4787,55 @@ def get_model_tokenizer_internvl(model_dir: str,
     return model, tokenizer
 
 
+def get_custom_device_map(n_gpu, local_world_size, local_rank):
+    if n_gpu == 8 and local_world_size == 2:    # 八卡 NPROC=2
+        d = {'vision_model.embeddings': 0}
+        for i in range( 0, 24):
+            d[f'vision_model.encoder.layers.{i}'] = 0
+
+        d.update( {'language_model.model.tok_embeddings': 2} )
+        for i in range( 0, 12):
+            d[f'language_model.model.layers.{i}'] = 2
+        for i in range(12, 24):
+            d[f'language_model.model.layers.{i}'] = 4
+        for i in range(24, 32):
+            d[f'language_model.model.layers.{i}'] = 6
+        d.update( {'language_model.model.norm': 6, 'language_model.output': 6, 'mlp1': 6, 'tree_conv': 6, 'shot_detector': 6, 'mlp_for_shot_select': 6, 'mlp_compress': 6} )
+
+        # d = {'vision_model.embeddings': 0}
+        # for i in range( 0, 12):
+        #     d[f'vision_model.encoder.layers.{i}'] = 0
+        # for i in range(12, 24):
+        #     d[f'vision_model.encoder.layers.{i}'] = 2
+        # d.update( {'language_model.model.tok_embeddings': 4} )
+        # for i in range( 0, 16):
+        #     d[f'language_model.model.layers.{i}'] = 4
+        # for i in range(16, 32):
+        #     d[f'language_model.model.layers.{i}'] = 6
+        # d.update( {'language_model.model.norm': 6, 'language_model.output': 6, 'mlp1': 6, 'tree_conv': 6, 'shot_detector': 6, 'mlp_for_shot_select': 6, 'mlp_compress': 6} )
+
+        assert local_rank in [0, 1]
+        if local_rank == 0: return d
+        if local_rank == 1: return {k: v + 1 for k, v in d.items()}
+    elif n_gpu == 8 and local_world_size == 4: # 八卡 NPROC=4
+        ...
+    elif n_gpu == 6 and local_world_size == 2: # 6卡 NPROC=2
+        d = {'vision_model.embeddings': 0}
+        for i in range( 0, 24):
+            d[f'vision_model.encoder.layers.{i}'] = 0
+
+        d.update( {'language_model.model.tok_embeddings': 2} )
+        for i in range( 0, 16):
+            d[f'language_model.model.layers.{i}'] = 2
+        for i in range(16, 32):
+            d[f'language_model.model.layers.{i}'] = 4
+        d.update( {'language_model.model.norm': 4, 'language_model.output': 4, 'mlp1': 4, 'tree_conv': 4, 'shot_detector': 4, 'mlp_for_shot_select': 4, 'mlp_compress': 4} )
+
+    elif local_world_size == 1: # 单进程 单卡调试
+        return 'auto' 
+    else:
+        raise Error(f'No custom device_map for {n_gpu}, {local_world_size}, {local_rank}.')
+
 @register_model(
     ModelType.hierar_internvl2_2b,
     '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B-tvm',
@@ -4818,6 +4867,18 @@ def get_model_tokenizer_hierar_internvl(model_dir: str,
                                         model_kwargs: Dict[str, Any],
                                         load_model: bool = True,
                                         **kwargs):
+    # customize device_map 
+    # 以 8卡 NPROC=4 为例 讲解这几个概念 它们改为大写即为对应的环境变量
+    # rank：            全部机器上 当前进程的索引 每个进程分别是0-3 (单机情况下)
+    # local_rank：      当前机器上 当前进程的索引 
+    # world_size：      全部机器上 总进程数 4
+    # local_world_size：当前机器上的进程数 4 (单机情况下)
+    n_gpu = torch.cuda.device_count()
+    _, local_rank, _, local_world_size = get_dist_setting()
+
+    my_device_map = get_custom_device_map(n_gpu=n_gpu, local_world_size=local_world_size, local_rank=local_rank)
+    model_kwargs['device_map'] = my_device_map
+    logger.info(f'You are using a custom device_map for {local_world_size} proc on {n_gpu} GPUs: {my_device_map}')
 
     model, tokenizer = get_model_tokenizer_internvl(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
 

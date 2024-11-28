@@ -623,13 +623,32 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     max_frame = len(vr) - 1
     fps = float(vr.get_avg_fps())
 
+    images = []
+    frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
+    for frame_index in frame_indices:
+        images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
+    return images
+
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
+
+@load_file_decorator
+def load_video_hierar_internvl(video_io: BytesIO, bound=None, num_segments=32, video_name=None):
+    from decord import VideoReader, cpu
+    from PIL import Image
+    vr = VideoReader(video_io, ctx=cpu(0), num_threads=1)
+    max_frame = len(vr) - 1
+    fps = float(vr.get_avg_fps())
+
     use_key_frames = False
     if not use_key_frames:
         # 如果视频过长 大于2min 才执行镜头分割 镜头筛选与镜内筛选 此时要密集抽帧并传到后面
         sec_len = round(max_frame / fps)
-        if sec_len > 120:
+        if sec_len > 120 and sec_len < 640:
             frame_num = sec_len // 4 # 比如按照fps=4抽帧
             frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frame_num)
+        elif sec_len >= 640:
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=64)
         else:
             frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
     else:
@@ -638,10 +657,24 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
         frame_indices = get_semantic_indices(vr, fps, num_segments).tolist()
         print(f"Getting semantic indices: {time.time() - start:.2f} sec used.")
     
+
+    batch_size = 40 # 每batch_size个帧开一个线程做转换 到PIL.Image
+
+    # 转为RGB
+    def process_batch(batch_frames):
+        return [Image.fromarray(frame).convert('RGB') for frame in batch_frames]
+
     images = []
-    from tqdm import tqdm
-    for frame_index in tqdm(frame_indices, desc='loading video', disable=True):
-        images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
+    # 使用 ThreadPoolExecutor 并行处理图像转换
+    with ThreadPoolExecutor(max_workers=16) as executor:  # 根据CPU核心数调整max_workers
+        # 将frame_indices分成若干batch处理
+        for i in tqdm(range(0, len(frame_indices), batch_size), desc=f'loading {video_name}', disable=True):
+            batch_indices = frame_indices[i : i + batch_size]
+            # 批量获取帧
+            batch_frames = vr.get_batch(batch_indices).asnumpy()
+            # 提交图像转换任务
+            images_batch = executor.submit(process_batch, batch_frames)
+            images.extend(images_batch.result())
 
     # save_type_str = '_uniform' if not use_key_frames else '_semantic'
     # for i in range(num_segments):

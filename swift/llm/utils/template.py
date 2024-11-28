@@ -27,7 +27,7 @@ from swift.torchacc_utils import pad_and_split_batch
 from swift.utils import get_dist_setting, get_logger, upper_bound, use_torchacc
 from .vision_utils import (load_audio_qwen, load_batch, load_image, load_video_cogvlm2, load_video_internvl,
                            load_video_llava, load_video_minicpmv_mplug_owl3, load_video_qwen2, rescale_image,
-                           transform_image, get_hierar_mask, plot_shot_split)
+                           transform_image, get_hierar_mask, plot_shot_split, load_video_hierar_internvl)
 from ...hub.errors import NotSupportError
 
 logger = get_logger()
@@ -2566,7 +2566,8 @@ register_template(TemplateType.internvl2, Internvl2Template(), use_model=True, l
 
 register_template(TemplateType.internvl2_phi3, Internvl2Phi3Template(), use_model=True, lazy_tokenize=True)
 
-
+import re
+import gc
 class HierarInternvl2Template(InternvlTemplate):
     # video_segments = 16
     system = '你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。'
@@ -2578,7 +2579,7 @@ class HierarInternvl2Template(InternvlTemplate):
         elif media_type == 'video':
             video_index = example['video_index']
             video = example['videos'][video_index]
-            example['images'] = load_video_internvl(video, num_segments=self.model.config.frm_num)  # load出所有帧 以备_post_encode()中筛选
+            example['images'] = load_video_hierar_internvl(video, num_segments=self.model.config.frm_num, video_name=video)  # load出所有帧 以备_post_encode()中筛选
             context_list = ['<IMG_CONTEXT>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造 用一个<IMG_CONTEXT>代替
             return context_list
 
@@ -2616,9 +2617,15 @@ class HierarInternvl2Template(InternvlTemplate):
         except Exception as e:
             log.error('KeyError: `input_ids` not found.')
 
+        pattern = r"<\|im_start\|>\s*user\s*\n\s*(.*?)\s*<\|im_end\|>"
+        regex = re.compile(pattern, re.DOTALL)                        # 预编译正则表达式，提高匹配效率
+        queries = regex.findall( self.tokenizer.decode(input_ids) )   # 提取所有匹配的内容
+        text_query = ' '.join([re.sub(r"<IMG_CONTEXT>", "", t).strip() for t in queries])    # 去除前后空白符 并过滤掉<IMG_CONTEXT>
+
         inputs['_data'] = {'input_ids': torch.tensor(inputs['input_ids']),
                            'labels': inputs['labels'],
                            'images': example['images'], 
+                           'text_query': text_query, 
                            'videos': example['videos']}    # 在调用层 会把_data送入post_encode
         return inputs, {}
 
@@ -2683,89 +2690,115 @@ class HierarInternvl2Template(InternvlTemplate):
         return inputs
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
-        input_ids, labels, images = data['input_ids'], data['labels'], data['images']
+        input_ids, labels, images, text_query = data['input_ids'], data['labels'], data['images'], data['text_query']
         ori_img_num = len(images)
 
-        # get the text_query_ids (between the only <IMG_CONTEXT> and the last second <|im_end|>)
-        vid_token_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0]
-        roll_end_id = self.tokenizer.encode('<|im_end|>', add_special_tokens=False)[0]
-        text_query_ids = input_ids[ torch.where(input_ids == vid_token_id)[0][0] + 1 : torch.where(input_ids == roll_end_id)[0][-2] ]
-        text_query = self.tokenizer.decode(text_query_ids)
-
-        # first, get the text embeds to know the device 
         embedding = model.get_input_embeddings()
-        device = embedding.weight.device
+        llm_device = embedding.weight.device
+        vit_device = model.vision_model.embeddings.patch_embedding.weight.device
 
-        if ori_img_num > 30:  # 如果是长视频 要执行镜头分割 镜头筛选与镜内筛选
+        has_video = True
+        input_size = get_env_args('input_size', int, 448)
+        max_num = get_env_args('max_num', int, 1 if has_video else 12)
+
+        pixel_values = [transform_image(image, input_size, max_num) for image in images]
+        num_patches = [pv.shape[0] for pv in pixel_values]
+        pixel_values = torch.cat(pixel_values, dim=0)              # [res1_img_num, 3, input_size=448, input_size]
+        pixel_values = pixel_values.to(self.model.dtype).to(vit_device)
+        
+        # torch.autograd.set_detect_anomaly(True)
+        
+        if ori_img_num > 30 and ori_img_num < 160:  # 如果是长视频 要执行镜头分割 镜头筛选与镜内筛选
+                
             # 1. filter shots (need training)
-            shot_list, semantic_indices = model.get_shot_list(images, device)
+            shot_list, semantic_indices = model.get_shot_list(images)
 
             # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_split.jpg')
 
-            has_video = True
-            input_size = get_env_args('input_size', int, 448)
-            max_num = get_env_args('max_num', int, 1 if has_video else 12)
+            if len(shot_list) >= 0: # 超过6个视频 才执行镜头筛选
+                text_query_ids = torch.tensor(self.tokenizer.encode(text_query))
 
-            if len(shot_list) >= 8: # 超过8个视频 才执行镜头筛选
-                keep_shot_mask = model.filter_shots(images, shot_list, semantic_indices, transform_image, text_query_ids, text_query,
-                                                    input_size, max_num, device, model.dtype)
-                _images, _sem_indices, _shot_list = [], [], []
-                for i in range(len(keep_shot_mask)):
-                    if keep_shot_mask[i] == 1:
-                        s, e = shot_list[i]
-                        _images += images[ s : e + 1 ]
-                        _s, _e = int(len(_images) - (e-s+1)), len(_images) - 1
-                        _shot_list.append( [_s, _e] )
-                        _sem_indices.append( (_s + _e) // 2 )
+                keep_shot_mask = model.filter_shots(pixel_values, shot_list, semantic_indices, transform_image, text_query_ids, text_query,
+                                                    input_size, max_num, vit_device, model.dtype)
+
+
+                # 使用*mask的方法 完成筛镜头
+                repeats = torch.tensor([end - start + 1 for start, end in shot_list]) # 计算每个shot的帧数 即该shot的0/1要重复的次数
+                keep_img_mask = torch.repeat_interleave(keep_shot_mask, repeats.to(vit_device))
+                pixel_values = pixel_values * keep_img_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+
+                pixel_values = self.model.t_linear_3( pixel_values.unsqueeze(-1) ).squeeze()
+
+                pixel_values = pixel_values[ torch.where(keep_img_mask==1.0)[0] ]
+
+                pixel_values = self.model.t_linear_4( pixel_values.unsqueeze(-1) ).squeeze()
+
+                # pixel_values = pixel_values[0:30, ...]
+
+                # _images, _sem_indices, _shot_list = [], [], []
+                # for i in range(len(keep_shot_mask)):
+                #     if keep_shot_mask[i] == 1:
+                #         s, e = shot_list[i]
+                #         _images += images[ s : e + 1 ]
+                #         _s, _e = int(len(_images) - (e-s+1)), len(_images) - 1
+                #         _shot_list.append( [_s, _e] )
+                #         _sem_indices.append( (_s + _e) // 2 )
                 
-                if not len(_images) < 16:   # 如果筛完镜头后，已经剩的比16少了 那就不筛镜头
-                    images = _images
-                    semantic_indices = torch.tensor(_sem_indices)
-                    shot_list = torch.tensor(_shot_list)
+                # if not len(_images) < 16:   # 如果筛完镜头后，已经剩的比16少了 那就不筛镜头
+                #     images = _images
+                #     semantic_indices = torch.tensor(_sem_indices)
+                #     shot_list = torch.tensor(_shot_list)
+
+                # del _images, _sem_indices, _shot_list, keep_shot_mask, text_query_ids
+                # torch.cuda.empty_cache()
+                # gc.collect()
 
             # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_filter.jpg')
 
-            # 2. filter intra-shot (not trainable)
-            pixel_values = [transform_image(image, input_size, max_num) for image in images]
-            num_patches = [pv.shape[0] for pv in pixel_values]
-            pixel_values = torch.cat(pixel_values, dim=0)              # [res1_img_num, 3, input_size=448, input_size]
-            pixel_values = pixel_values.to(self.model.dtype).to(device)
+            # # 2. filter intra-shot (not trainable)
+            vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=vit_device) # [res_img_num, frm_token_num, vit_dim]
 
-            vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=device) # [res_img_num, frm_token_num, vit_dim]
+            # if vit_embeds.shape[0] > 32:    # 镜内筛选是保留一半的，所以只有原本大于32的 筛选后才能大于16 才能进行镜内筛选
+            #     _vit_embeds = []
+            #     for i, (l, r) in enumerate(shot_list):
+            #         if r > l + 1:
+            #             frames_in_cur_shot = vit_embeds[l : r + 1, :, :]        # [cur_shot_frame_num, frm_token_num, vit_dim]
+            #             seman_in_cur_shot = vit_embeds[ semantic_indices[i] ]   # [frm_token_num, vit_dim]
+            #             sim = torch.matmul(frames_in_cur_shot, seman_in_cur_shot.permute(1, 0)) # [cur_shot_frame_num, frm_token_num, frm_token_num]
+            #             sim = torch.mean(sim, (1, 2))
 
-            if vit_embeds.shape[0] > 32:    # 这个地方是保留一半的，所以只有原本大于32的，筛选后才能大于16 
-                _vit_embeds = []
-                for i, (l, r) in enumerate(shot_list):
-                    if r > l + 1:
-                        frames_in_cur_shot = vit_embeds[l : r + 1, :, :]        # [cur_shot_frame_num, frm_token_num, vit_dim]
-                        seman_in_cur_shot = vit_embeds[ semantic_indices[i] ]   # [frm_token_num, vit_dim]
-                        sim = torch.matmul(frames_in_cur_shot, seman_in_cur_shot.permute(1, 0)) # [cur_shot_frame_num, frm_token_num, frm_token_num]
-                        sim = torch.mean(sim, (1, 2))
-
-                        _, keep_frame_indices = torch.topk(sim, k=int((len(sim) + 1) // 2), dim=0, largest=False)   # 保留镜头内一半的帧
-                        keep_frame_indices = torch.sort(keep_frame_indices).values
+            #             _, keep_frame_indices = torch.topk(sim, k=int((len(sim) + 1) // 2), dim=0, largest=False)   # 保留镜头内一半的帧
+            #             keep_frame_indices = torch.sort(keep_frame_indices).values
                         
-                        keep_frame_indices += l
-                        _vit_embeds.append(vit_embeds[keep_frame_indices, :, :])
-                    else:
-                        _vit_embeds.append(vit_embeds[l : r + 1, :, :])
-                vit_embeds = torch.cat(_vit_embeds, dim=0)  # [res2_img_num, 3, input_size=448, input_size]
+            #             keep_frame_indices += l
+            #             _vit_embeds.append(vit_embeds[keep_frame_indices, :, :])
+            #         else:
+            #             _vit_embeds.append(vit_embeds[l : r + 1, :, :])
+            #     vit_embeds = torch.cat(_vit_embeds, dim=0)  # [res2_img_num, 3, input_size=448, input_size]
 
             # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
+            logger.info(f'Reducing {ori_img_num} frames to {vit_embeds.shape[0]} frames by filtering.')
+            ori_img_num = vit_embeds.shape[0]
+            
             all_vit_embeds = model.tree_conv_from_vit_embeds(vit_embeds)    # 得到coaser的embeds
-            del data['images']  # 要images已经没用了，省点空间
         
-        else:   # 如果不是长视频 默认均匀抽self.model.config.frm_num个帧
-            assert len(images) == self.model.config.frm_num
-            pixel_values = [transform_image(image, input_size, max_num) for image in images]
-            num_patches = [pv.shape[0] for pv in pixel_values]
-            pixel_values = torch.cat(pixel_values, dim=0)              # [res1_img_num, 3, input_size=448, input_size]
-            pixel_values = pixel_values.to(self.model.dtype).to(device)
+        elif ori_img_num >= 160:    # 如果是超长视频 默认均匀抽64个帧
+            # assert len(images) == 64, f'{len(images)} != 64'
 
-            all_vit_embeds = model.extract_feature(pixel_values, include_tree_conv=True).to(device=device) # [img_num, frm_token_num, vit_dim]
+            logger.info(f'Reducing {ori_img_num} frames to {pixel_values.shape[0]} frames (uniform select on videos longer than 8 min).')
+
+            all_vit_embeds = model.extract_feature(pixel_values, include_tree_conv=True).to(device=vit_device) # [img_num, frm_token_num, vit_dim]
+
+        else:   # 如果不是长视频 默认均匀抽self.model.config.frm_num个帧
+            # assert len(images) == self.model.config.frm_num, f'{len(images)} != {self.model.config.frm_num}'
+
+            logger.info(f'Reducing {ori_img_num} frames to {pixel_values.shape[0]} frames (uniform select on videos shorter than 2 min).')
+
+            all_vit_embeds = model.extract_feature(pixel_values, include_tree_conv=True).to(device=vit_device) # [img_num, frm_token_num, vit_dim]
+
+        del data['images']  # 要images已经没用了，省点空间
 
         # 进行input_ids的组装(包括labels)
-        ori_img_num = vit_embeds.shape[0]
         input_img_num = all_vit_embeds.shape[0]
         inputs = data
         
@@ -2837,11 +2870,11 @@ class HierarInternvl2Template(InternvlTemplate):
             inputs['vis_sta'], inputs['vis_end'] = vis_sta.unsqueeze(0), vis_end.unsqueeze(0)   # 制造bsz=1维度 必须在这里制造，因为infer时不经过data_collator
             inputs['coaser_sta'], inputs['coaser_end'] = coaser_sta.unsqueeze(0), coaser_end.unsqueeze(0)
         
-        inputs['input_ids'] = input_ids = torch.tensor(input_ids).to(device=device)
+        inputs['input_ids'] = input_ids = torch.tensor(input_ids).to(device=llm_device)
         inputs['input_ids_bak'] = input_ids.unsqueeze(0)
 
         # 把all_vit_embeds放入input_embeds中
-        inputs_embeds = embedding(input_ids[None])[0].to(device=device)
+        inputs_embeds = embedding(input_ids[None])[0].to(device=llm_device)
 
         img_context_id = self.tokenizer.encode('<IMG_CONTEXT>', add_special_tokens=False)[0]
         selected = (input_ids == img_context_id)
