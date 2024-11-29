@@ -4876,9 +4876,9 @@ def get_model_tokenizer_hierar_internvl(model_dir: str,
     n_gpu = torch.cuda.device_count()
     _, local_rank, _, local_world_size = get_dist_setting()
 
-    my_device_map = get_custom_device_map(n_gpu=n_gpu, local_world_size=local_world_size, local_rank=local_rank)
-    model_kwargs['device_map'] = my_device_map
-    logger.info(f'You are using a custom device_map for {local_world_size} proc on {n_gpu} GPUs: {my_device_map}')
+    # my_device_map = get_custom_device_map(n_gpu=n_gpu, local_world_size=local_world_size, local_rank=local_rank)
+    # model_kwargs['device_map'] = my_device_map
+    # logger.info(f'You are using a custom device_map for {local_world_size} proc on {n_gpu} GPUs: {my_device_map}')
 
     model, tokenizer = get_model_tokenizer_internvl(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
 
