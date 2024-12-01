@@ -2579,7 +2579,7 @@ class HierarInternvl2Template(InternvlTemplate):
         elif media_type == 'video':
             video_index = example['video_index']
             video = example['videos'][video_index]
-            example['images'] = load_video_hierar_internvl(video, num_segments=self.model.config.frm_num, video_name=video)  # load出所有帧 以备_post_encode()中筛选
+            example['images'], example['len_type'] = load_video_hierar_internvl(video, num_segments=self.model.config.frm_num, video_name=video)  # load出所有帧 以备_post_encode()中筛选
             context_list = ['<IMG_CONTEXT>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造 用一个<IMG_CONTEXT>代替
             return context_list
 
@@ -2615,7 +2615,11 @@ class HierarInternvl2Template(InternvlTemplate):
         try:
             input_ids = inputs['input_ids']
         except Exception as e:
-            log.error('KeyError: `input_ids` not found.')
+            logger.error('KeyError: `input_ids` not found.')
+
+        if self._is_training and example['len_type'] != 'long': # 这两行仅在三岔路中的模块(mlp_for_shot_select)被训练时使用 用于保证每次计算图一致
+            logger.info(f'Skip this data sample when training, to ensure the match between computation graphs. Video:' + str(example['videos']))
+            return tuple(), {}
 
         pattern = r"<\|im_start\|>\s*user\s*\n\s*(.*?)\s*<\|im_end\|>"
         regex = re.compile(pattern, re.DOTALL)                        # 预编译正则表达式，提高匹配效率
@@ -2625,6 +2629,7 @@ class HierarInternvl2Template(InternvlTemplate):
         inputs['_data'] = {'input_ids': torch.tensor(inputs['input_ids']),
                            'labels': inputs['labels'],
                            'images': example['images'], 
+                           'len_type': example['len_type'], 
                            'text_query': text_query, 
                            'videos': example['videos']}    # 在调用层 会把_data送入post_encode
         return inputs, {}
@@ -2690,7 +2695,7 @@ class HierarInternvl2Template(InternvlTemplate):
         return inputs
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
-        input_ids, labels, images, text_query = data['input_ids'], data['labels'], data['images'], data['text_query']
+        input_ids, labels, images, text_query, len_type = data['input_ids'], data['labels'], data['images'], data['text_query'], data['len_type']
         ori_img_num = len(images)
 
         embedding = model.get_input_embeddings()
@@ -2708,66 +2713,34 @@ class HierarInternvl2Template(InternvlTemplate):
     
         vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=vit_device) # [ori_img_num, frm_token_num, vit_dim]
 
-        if ori_img_num > 30 and ori_img_num < 160:  # 如果是长视频 要执行镜头筛选与镜内筛选 先对所有帧都进行处理
-            # 1. filter shots (need training)
+        if self._is_training:
+            assert len_type == 'long', f'Are you training mlp_for_shot_select? This will lead to the mismatch between computation graphs.'
+
+        if len_type == 'long':  # 如果是长视频 要执行镜头筛选与镜内筛选
+            text_query_ids = torch.tensor(self.tokenizer.encode(text_query))
+            
             shot_list, semantic_indices = model.get_shot_list(images)
             # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_split.jpg')
+            keep_img_mask = model.filter_shots(vit_embeds, shot_list, semantic_indices, text_query_ids, text_query,
+                                                input_size, max_num, vit_device, model.dtype)
 
-            if len(shot_list) >= 6: # 超过6个视频 才执行镜头筛选
-                text_query_ids = torch.tensor(self.tokenizer.encode(text_query))
-
-                keep_shot_mask = model.filter_shots(vit_embeds, shot_list, semantic_indices, text_query_ids, text_query,
-                                                    input_size, max_num, vit_device, model.dtype)
-
-                repeats = torch.tensor([end - start + 1 for start, end in shot_list]) # 计算每个shot的帧数 即该shot的0/1要重复的次数
-                keep_img_mask = torch.repeat_interleave(keep_shot_mask, repeats.to(vit_device))
-                if sum(keep_img_mask) > 16:   # 如果筛完镜头后，已经剩的比16帧少了 那就不筛镜头
-                    # 使用 乘以mask 的方法 完成筛镜头
-                    vit_embeds = vit_embeds * keep_img_mask.unsqueeze(-1).unsqueeze(-1)
-                    vit_embeds = vit_embeds[ torch.where(keep_img_mask==1.0)[0] ]   # 这一步索引是没法获得梯度的 但我们本来就不需要这个索引获得梯度
-                    
-                    # # 因为做了筛镜头 要更新shot_list和semantic_indices 以便镜内筛选
-                    # _sem_indices, _shot_list = [], []
-                    # for i in range(len(keep_shot_mask)):
-                    #     if keep_shot_mask[i] == 1:
-                    #         s, e = shot_list[i]
-                    #         _s, _e = int(len(_images) - (e-s+1)), len(_images) - 1
-                    #         _shot_list.append( [_s, _e] )
-                    #         _sem_indices.append( (_s + _e) // 2 )
-                    
-                    #     semantic_indices = torch.tensor(_sem_indices)
-                    #     shot_list = torch.tensor(_shot_list)
-
-            # # 2. filter intra-shot (not trainable)    初步实验先不做镜内筛选 这个镜内筛选如果要做 只能和上一步gumbel一起做
-            # if vit_embeds.shape[0] > 32:    # 镜内筛选是保留一半的，所以只有原本大于32的 筛选后才能大于16 才能进行镜内筛选
-            #     _vit_embeds = []
-            #     for i, (l, r) in enumerate(shot_list):
-            #         if r > l + 1:
-            #             frames_in_cur_shot = vit_embeds[l : r + 1, :, :]        # [cur_shot_frame_num, frm_token_num, vit_dim]
-            #             seman_in_cur_shot = vit_embeds[ semantic_indices[i] ]   # [frm_token_num, vit_dim]
-            #             sim = torch.matmul(frames_in_cur_shot, seman_in_cur_shot.permute(1, 0)) # [cur_shot_frame_num, frm_token_num, frm_token_num]
-            #             sim = torch.mean(sim, (1, 2))
-
-            #             _, keep_frame_indices = torch.topk(sim, k=int((len(sim) + 1) // 2), dim=0, largest=False)   # 保留镜头内一半的帧 [不可回传]
-            #             keep_frame_indices = torch.sort(keep_frame_indices).values
-                        
-            #             keep_frame_indices = keep_frame_indices + l
-            #             _vit_embeds.append(vit_embeds[keep_frame_indices, :, :])
-            #         else:
-            #             _vit_embeds.append(vit_embeds[l : r + 1, :, :])
-            #     vit_embeds = torch.cat(_vit_embeds, dim=0)  # [res2_img_num, 3, input_size=448, input_size]
+            assert sum(keep_img_mask) >= 16, f'sum(keep_img_mask) = {sum(keep_img_mask)} < 16.'
+            # 使用 乘以mask 的方法 完成筛选
+            vit_embeds = vit_embeds * keep_img_mask.to(vit_embeds.dtype).unsqueeze(-1).unsqueeze(-1)
+            vit_embeds = vit_embeds[ torch.where(keep_img_mask==1.0)[0] ]   # 这一步索引是没法获得梯度的 但我们本来就不需要这个索引获得梯度
+            
+            logger.info(f'[Filtering] Reducing {ori_img_num} frames to {vit_embeds.shape[0]} frames.')
 
             # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
-            logger.info(f'Reducing {ori_img_num} frames to {vit_embeds.shape[0]} frames by filtering.')
             ori_img_num = vit_embeds.shape[0]
                     
-        elif ori_img_num >= 160:    # 如果是超长视频 默认均匀抽64个帧 此时_post_encode传入的images应该是64个
-            # assert vit_embeds.shape[0] == 64, f'{vit_embeds.shape[0]} != 64'
-            logger.info(f'Reducing {ori_img_num} frames to {vit_embeds.shape[0]} frames (uniform select on videos longer than 8 min).')
+        elif len_type == 'ex_long':    # 如果是超长视频 默认均匀抽64个帧 此时_post_encode传入的images应该是64个
+            assert vit_embeds.shape[0] == 64, f'{vit_embeds.shape[0]} != 64'
+            logger.info(f'[Too Long] Uniform sample {vit_embeds.shape[0]} frames from original {ori_img_num} frames (longer than 640 sec).')
 
-        else:   # 如果不是长视频 默认均匀抽self.model.config.frm_num个帧
-            # assert vit_embeds.shape[0] == self.model.config.frm_num, f'{vit_embeds.shape[0]} != {self.model.config.frm_num}'
-            logger.info(f'Reducing {ori_img_num} frames to {vit_embeds.shape[0]} frames (uniform select on videos shorter than 2 min).')
+        elif len_type == 'short':      # 如果不是长视频 默认均匀抽self.model.config.frm_num个帧
+            assert vit_embeds.shape[0] == 16, f'{vit_embeds.shape[0]} != 16'
+            logger.info(f'[Short] Uniform sample {vit_embeds.shape[0]} frames from original {ori_img_num} frames (shorter than 320 sec).')
 
         # 得到coaser的embeds
         all_vit_embeds = model.tree_conv_from_vit_embeds(vit_embeds)

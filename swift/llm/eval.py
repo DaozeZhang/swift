@@ -254,7 +254,7 @@ def vlmeval_runner(args: EvalArguments, dataset: List[str], model_type: str, is_
             **limit_config,
             'nproc':
             args.eval_nproc,
-            'nframe': 16
+            'nframe': 8
 
             # 'OPENAI_API_KEY': 'EMPTY',
             # 'OPENAI_API_BASE': 'http://127.0.0.1:8866/v1/chat/completions', # judge model api

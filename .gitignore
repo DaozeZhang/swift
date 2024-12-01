@@ -133,6 +133,7 @@ benchmarks/
 eval_outputs/
 transformers/
 vlmeval/
+vlmeval_/
 my_model/
 
 # Pytorch
