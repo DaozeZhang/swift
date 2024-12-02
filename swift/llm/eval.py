@@ -248,7 +248,8 @@ def vlmeval_runner(args: EvalArguments, dataset: List[str], model_type: str, is_
                     'api_base': url,
                     'key': args.eval_token,
                     'type': model_type,
-                    'temperature': args.temperature
+                    'temperature': args.temperature,
+                    'video_llm': True
                 },
             ],
             **limit_config,

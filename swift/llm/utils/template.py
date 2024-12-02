@@ -2616,10 +2616,14 @@ class HierarInternvl2Template(InternvlTemplate):
             input_ids = inputs['input_ids']
         except Exception as e:
             logger.error('KeyError: `input_ids` not found.')
-
+        
+        if inputs['labels'] is None: 
+            logger.warn(f'The value of `labels` is None (ignore this error if you are inferring rather than training).'
+                        f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
+        
         if self._is_training and example['len_type'] != 'long': # 这两行仅在三岔路中的模块(mlp_for_shot_select)被训练时使用 用于保证每次计算图一致
             logger.info(f'Skip this data sample when training, to ensure the match between computation graphs. Video:' + str(example['videos']))
-            return tuple(), {}
+            return {}, {}
 
         pattern = r"<\|im_start\|>\s*user\s*\n\s*(.*?)\s*<\|im_end\|>"
         regex = re.compile(pattern, re.DOTALL)                        # 预编译正则表达式，提高匹配效率
@@ -2793,9 +2797,6 @@ class HierarInternvl2Template(InternvlTemplate):
         
         inputs['input_ids'] = input_ids
         inputs['labels'] = labels
-        if inputs['labels'] is None: 
-            logger.error(f'The value of `labels` is None (ignore this error if you are inferring rather than training).'
-                         f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
         frm_token_num = self.model.config.frm_token_num
 
         # 构造vis_sta, vis_end, coaser_sta, coaser_end 

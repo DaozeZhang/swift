@@ -1,4 +1,39 @@
+import torch
 
+def gumbel_softmax(logits, tau = 1, hard = False, eps = 1e-10, dim = -1,):
+    # if has_torch_function_unary(logits):
+    #     return handle_torch_function(
+    #         gumbel_softmax, (logits,), logits, tau=tau, hard=hard, eps=eps, dim=dim
+    #     )
+    gumbels = (
+        -torch.empty_like(logits, memory_format=torch.legacy_contiguous_format)
+        .exponential_()
+        .log()
+    )  # ~Gumbel(0,1)
+    gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+    y_soft = gumbels.softmax(dim)
+
+    if hard:
+        # Straight through.
+        index = y_soft.max(dim, keepdim=True)[1]
+        y_hard = torch.zeros_like(
+            logits, memory_format=torch.legacy_contiguous_format
+        ).scatter_(dim, index, 1.0)
+        ret = y_hard - y_soft.detach() + y_soft
+    else:
+        # Reparametrization trick.
+        ret = y_soft
+    return ret
+
+N = 10
+prob_0 = torch.rand((N,))
+prob_1 = 1 - prob_0
+prob = torch.stack([prob_0, prob_1], dim=1)
+
+logits = torch.log_softmax(prob, dim=1) # ?
+
+res = gumbel_softmax(logits, hard=True, tau=0.5, dim=1)
+keep_mask = res[:, 1]
 
 
 
