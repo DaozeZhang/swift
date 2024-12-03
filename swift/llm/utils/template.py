@@ -2738,8 +2738,8 @@ class HierarInternvl2Template(InternvlTemplate):
                 # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
                 ori_img_num = vit_embeds.shape[0]
                         
-            elif len_type == 'ex_long':    # 如果是超长视频 默认均匀抽64个帧 此时_post_encode传入的images应该是64个
-                assert vit_embeds.shape[0] == 64, f'{vit_embeds.shape[0]} != 64'
+            elif len_type == 'ex_long':    # 如果是超长视频 默认均匀抽32个帧 此时_post_encode传入的images应该是32个
+                assert vit_embeds.shape[0] == 32, f'{vit_embeds.shape[0]} != 32'
                 logger.info(f'[Too Long] Uniform sample {vit_embeds.shape[0]} frames from original {ori_img_num} frames (longer than 640 sec).')
 
             elif len_type == 'short':      # 如果不是长视频 默认均匀抽self.model.config.frm_num个帧

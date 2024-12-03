@@ -645,12 +645,12 @@ def load_video_hierar_internvl(video_io: BytesIO, bound=None, num_segments=1, vi
     if not use_key_frames:
         if use_diff_ways:
             sec_len = round(max_frame / fps)
-            if sec_len > 160 and sec_len < 640:
-                frame_num = sec_len // 4        # 比如按照fps=4抽帧 产生40~160帧  (_post_encode中 乘以0.4得到16~64帧)
+            if sec_len >= 320 and sec_len < 640:
+                frame_num = sec_len // 8        # 比如按照fps=8抽帧 产生40~80帧  (_post_encode中 乘以0.4得到16~32帧)
                 frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frame_num)
                 len_type = 'long'
             elif sec_len >= 640:
-                frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=64)
+                frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=32)
                 len_type = 'ex_long'
             else:
                 frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16)
