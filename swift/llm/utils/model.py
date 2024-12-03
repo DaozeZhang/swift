@@ -4881,8 +4881,9 @@ def get_model_tokenizer_hierar_internvl(model_dir: str,
     # logger.info(f'You are using a custom device_map for {local_world_size} proc on {n_gpu} GPUs: {my_device_map}')
 
     model, tokenizer = get_model_tokenizer_internvl(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
-
-    model.shot_detector.to(torch.float32)     # the infer of TransNetV2 must in float32 
+    
+    if model.config.use_diff_ways:
+        model.shot_detector.to(torch.float32)     # the infer of TransNetV2 must in float32 
     return model, tokenizer
 
 

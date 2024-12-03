@@ -2579,7 +2579,12 @@ class HierarInternvl2Template(InternvlTemplate):
         elif media_type == 'video':
             video_index = example['video_index']
             video = example['videos'][video_index]
-            example['images'], example['len_type'] = load_video_hierar_internvl(video, num_segments=self.model.config.frm_num, video_name=video)  # load出所有帧 以备_post_encode()中筛选
+            example['images'], example['len_type'] = load_video_hierar_internvl(
+                video, 
+                num_segments=self.model.config.frm_num, 
+                video_name=video, 
+                use_diff_ways=self.model.config.use_diff_ways,
+            )  # load出所有帧 以备_post_encode()中筛选
             context_list = ['<IMG_CONTEXT>']     # 原本应该形如 ['Frame1: ', '<img>', [-100], '</img>\n', 'Frame2: ', ...] 但这里不构造 用一个<IMG_CONTEXT>代替
             return context_list
 
@@ -2621,21 +2626,24 @@ class HierarInternvl2Template(InternvlTemplate):
             logger.warn(f'The value of `labels` is None (ignore this error if you are inferring rather than training).'
                         f' This data info:  query: {example.get("query")}  response: {example.get("response")}')
         
-        if self._is_training and example['len_type'] != 'long': # 这两行仅在三岔路中的模块(mlp_for_shot_select)被训练时使用 用于保证每次计算图一致
-            logger.info(f'Skip this data sample when training, to ensure the match between computation graphs. Video:' + str(example['videos']))
-            return {}, {}
-
-        pattern = r"<\|im_start\|>\s*user\s*\n\s*(.*?)\s*<\|im_end\|>"
-        regex = re.compile(pattern, re.DOTALL)                        # 预编译正则表达式，提高匹配效率
-        queries = regex.findall( self.tokenizer.decode(input_ids) )   # 提取所有匹配的内容
-        text_query = ' '.join([re.sub(r"<IMG_CONTEXT>", "", t).strip() for t in queries])    # 去除前后空白符 并过滤掉<IMG_CONTEXT>
-
         inputs['_data'] = {'input_ids': torch.tensor(inputs['input_ids']),
                            'labels': inputs['labels'],
                            'images': example['images'], 
                            'len_type': example['len_type'], 
-                           'text_query': text_query, 
                            'videos': example['videos']}    # 在调用层 会把_data送入post_encode
+
+        if self.model.config.use_diff_ways:
+            if self._is_training and example['len_type'] != 'long': # 这两行仅在三岔路中的模块(mlp_for_shot_select)被训练时使用 用于保证每次计算图一致
+                logger.info(f'Skip this data sample when training, to ensure the match between computation graphs. Video:' + str(example['videos']))
+                return {}, {}
+
+            pattern = r"<\|im_start\|>\s*user\s*\n\s*(.*?)\s*<\|im_end\|>"
+            regex = re.compile(pattern, re.DOTALL)                        # 预编译正则表达式，提高匹配效率
+            queries = regex.findall( self.tokenizer.decode(input_ids) )   # 提取所有匹配的内容
+            text_query = ' '.join([re.sub(r"<IMG_CONTEXT>", "", t).strip() for t in queries])    # 去除前后空白符 并过滤掉<IMG_CONTEXT>
+
+            inputs['_data']['text_query'] = text_query
+
         return inputs, {}
 
     def insert_all_img(self, inputs, nframes):    # 将唯一的一个<IMG_CONTEXT>替换成ori+coaser的视频token
@@ -2684,7 +2692,7 @@ class HierarInternvl2Template(InternvlTemplate):
         return inputs
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
-        input_ids, labels, images, text_query, len_type = data['input_ids'], data['labels'], data['images'], data['text_query'], data['len_type']
+        input_ids, labels, images, len_type = data['input_ids'], data['labels'], data['images'], data['len_type']
         ori_img_num = len(images)
 
         embedding = model.get_input_embeddings()
@@ -2702,34 +2710,41 @@ class HierarInternvl2Template(InternvlTemplate):
     
         vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=vit_device) # [ori_img_num, frm_token_num, vit_dim]
 
-        if self._is_training:
-            assert len_type == 'long', f'Are you training mlp_for_shot_select? This will lead to the mismatch between computation graphs.'
+        if not self.model.config.use_diff_ways:
+            # Stage1-3 均匀采16帧 压缩到128tokens 不涉及筛帧和帧数变化
+            logger.info(f'[Stage1-3] {ori_img_num} frames * {vit_embeds.shape[1]} tokens.')
 
-        if len_type == 'long':  # 如果是长视频 要执行镜头筛选与镜内筛选
-            text_query_ids = torch.tensor(self.tokenizer.encode(text_query))
-            
-            shot_list, semantic_indices = model.get_shot_list(images)
-            # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_split.jpg')
-            keep_img_mask = model.filter_shots(vit_embeds, shot_list, semantic_indices, text_query_ids, text_query,
-                                                input_size, max_num, vit_device, model.dtype, self._is_training)
+        else:   
+            # Stage4 带筛选的训练和推理
+            if self._is_training:
+                assert len_type == 'long', f'Are you training mlp_for_shot_select? This will lead to the mismatch between computation graphs.'
 
-            assert sum(keep_img_mask) >= 16, f'sum(keep_img_mask) = {sum(keep_img_mask)} < 16.'
-            # 使用 乘以mask 的方法 完成筛选
-            vit_embeds = vit_embeds * keep_img_mask.to(vit_embeds.dtype).unsqueeze(-1).unsqueeze(-1)
-            vit_embeds = vit_embeds[ torch.where(keep_img_mask==1.0)[0] ]   # 这一步索引是没法获得梯度的 但我们本来就不需要这个索引获得梯度
-            
-            logger.info(f'[Filtering] Reducing {ori_img_num} frames to {vit_embeds.shape[0]} frames.')
+            if len_type == 'long':  # 如果是长视频 要执行镜头筛选与镜内筛选
+                text_query = data['text_query']
+                text_query_ids = torch.tensor(self.tokenizer.encode(text_query))
+                
+                shot_list, semantic_indices = model.get_shot_list(images)
+                # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_split.jpg')
+                keep_img_mask = model.filter_shots(vit_embeds, shot_list, semantic_indices, text_query_ids, text_query,
+                                                    input_size, max_num, vit_device, model.dtype, self._is_training)
 
-            # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
-            ori_img_num = vit_embeds.shape[0]
-                    
-        elif len_type == 'ex_long':    # 如果是超长视频 默认均匀抽64个帧 此时_post_encode传入的images应该是64个
-            assert vit_embeds.shape[0] == 64, f'{vit_embeds.shape[0]} != 64'
-            logger.info(f'[Too Long] Uniform sample {vit_embeds.shape[0]} frames from original {ori_img_num} frames (longer than 640 sec).')
+                assert sum(keep_img_mask) >= 16, f'sum(keep_img_mask) = {sum(keep_img_mask)} < 16.'
+                # 使用 乘以mask 的方法 完成筛选
+                vit_embeds = vit_embeds * keep_img_mask.to(vit_embeds.dtype).unsqueeze(-1).unsqueeze(-1)
+                vit_embeds = vit_embeds[ torch.where(keep_img_mask==1.0)[0] ]   # 这一步索引是没法获得梯度的 但我们本来就不需要这个索引获得梯度
+                
+                logger.info(f'[Filtering] Reducing {ori_img_num} frames to {vit_embeds.shape[0]} frames.')
 
-        elif len_type == 'short':      # 如果不是长视频 默认均匀抽self.model.config.frm_num个帧
-            assert vit_embeds.shape[0] == 16, f'{vit_embeds.shape[0]} != 16'
-            logger.info(f'[Short] Uniform sample {vit_embeds.shape[0]} frames from original {ori_img_num} frames (shorter than 320 sec).')
+                # 至此 我们知道了最后有多少帧要插入input_ids 并且已获得它们的vit_embeds (但还没获得他们coaser的vit_embeds)
+                ori_img_num = vit_embeds.shape[0]
+                        
+            elif len_type == 'ex_long':    # 如果是超长视频 默认均匀抽64个帧 此时_post_encode传入的images应该是64个
+                assert vit_embeds.shape[0] == 64, f'{vit_embeds.shape[0]} != 64'
+                logger.info(f'[Too Long] Uniform sample {vit_embeds.shape[0]} frames from original {ori_img_num} frames (longer than 640 sec).')
+
+            elif len_type == 'short':      # 如果不是长视频 默认均匀抽self.model.config.frm_num个帧
+                assert vit_embeds.shape[0] == 16, f'{vit_embeds.shape[0]} != 16'
+                logger.info(f'[Short] Uniform sample {vit_embeds.shape[0]} frames from original {ori_img_num} frames (shorter than 320 sec).')
 
         # 得到coaser的embeds
         all_vit_embeds = model.tree_conv_from_vit_embeds(vit_embeds)
@@ -2786,7 +2801,8 @@ class HierarInternvl2Template(InternvlTemplate):
         inputs_embeds[selected] = all_vit_embeds.reshape(-1, all_vit_embeds.shape[-1]).to(inputs_embeds.device)
         inputs['inputs_embeds'] = inputs_embeds
 
-        del inputs['images'], inputs['len_type'], inputs['text_query'], inputs['videos']
+        del inputs['images'], inputs['len_type'], inputs['videos']
+        inputs.pop('text_query', None)
         return inputs 
 
 

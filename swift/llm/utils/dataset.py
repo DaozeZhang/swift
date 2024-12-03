@@ -188,8 +188,8 @@ class DatasetName:
     moviechat_1k_test = 'moviechat-1k-test'
     moviechat_1k_train = 'moviechat-1k-train'
     video_mme = 'video-mme'
-    vnbench = 'vn-bench'
-    lvbench = 'lv-bench'
+    vnbench = 'vnbench'
+    lvbench = 'lvbench'
     mlvu_valid = 'mlvu-valid'
     mlvu_test = 'mlvu-test'
     long_video_bench_valid = 'long-video-bench-valid'
@@ -931,7 +931,7 @@ def _preprocess_egoschema(dataset: DATASET_TYPE) -> DATASET_TYPE:
         return {
             'query': d['question'] + '\n' + str(d['option']),
             'response': transfer_to_option[d['answer']],
-            'videos': [os.path.join(local_dir, f"{d['video_idx']}.mp4")],
+            'videos': os.path.join(local_dir, f"{d['video_idx']}.mp4"),     # not as a list
         }
 
     return dataset.map(_process).filter(lambda row: row['query'] is not None)
@@ -1212,6 +1212,25 @@ register_dataset(
 #     tags=['chat', 'multi-modal', 'video'])
 
 
+def convert_long_video_bench_valid(dataset,):
+    import concurrent.futures
+    from PIL import Image
+    def process_item(i):
+        if isinstance(dataset[i]['inputs'][0], Image.Image):
+            query = '\n'.join(dataset[i]['inputs'][1:])
+        else:
+            query = '\n'.join(e for e in dataset[i]['inputs'] if not isinstance(e, Image.Image))
+        return {
+            'query': query,
+            'response': dataset[i]['correct_choice'],
+            'id': dataset[i]['id']
+        }
+
+    ds_len = len(dataset)   # 100 for DEBUG
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        dict_list = list(tqdm(executor.map(process_item, range(ds_len)), total=ds_len, desc='Converting LongVideoBench-valid Data...'))
+    return dict_list
+
 def get_dataset_long_video_bench_valid(dataset_id: str,
                                        subsets: Optional[List[str]],
                                        preprocess_func: PreprocessFunc,
@@ -1235,16 +1254,10 @@ def get_dataset_long_video_bench_valid(dataset_id: str,
     
     from longvideobench import LongVideoBenchDataset
     dataset = LongVideoBenchDataset('/mnt/nas1/daoze/repo/LongVideoBench', "lvb_val.json", max_num_frames=1)    # 这个类默认会直接load出若干帧和问题和答案 并组织在一个list里 但我们希望分开处理 因此max_num_frames随便写个1
-    # dataset = LongVideoBenchDataset('/mnt/nas1/daoze/repo/LongVideoBench', "lvb_test_wo_gt.json", max_num_frames=1)
-    
-    from PIL import Image
-    dict_list = [{
-            'query': '\n'.join(dataset[i]['inputs'][1:]) if isinstance(dataset[i]['inputs'][0], Image.Image)
-                    else '\n'.join(e for e in dataset[i]['inputs'] if not isinstance(e, Image.Image)),
-            'response': dataset[i]['correct_choice'],
-            'id': dataset[i]['id']
-        } for i in tqdm(range(0, 100), desc='extracting long video bench...')]
-    
+    # dataset = LongVideoBenchDataset('/mnt/nas1/daoze/repo/LongVideoBench', "lvb_test_wo_gt.json", max_num_frames=1
+
+    dict_list = convert_long_video_bench_valid(dataset)
+
     import pandas as pd
     hf_dataset = HfDataset.from_pandas(pd.DataFrame(dict_list))
 
@@ -1262,7 +1275,7 @@ def _preprocess_long_video_bench_valid(dataset: DATASET_TYPE) -> DATASET_TYPE:
         return {
             'query': d['query'],
             'response': d['response'],
-            'videos': [os.path.join(video_path, f"{videos}.mp4")],
+            'videos': os.path.join(video_path, f"{videos}.mp4"),     # not as a list
         }
 
     return dataset.map(_process).filter(lambda row: row['query'] is not None)
@@ -1325,7 +1338,7 @@ def _preprocess_vnbench(dataset: DATASET_TYPE) -> DATASET_TYPE:
         return {
             'query': d['question'] + '\n' + '\n'.join(d['options']),
             'response': d['gt_option'],
-            'videos': [os.path.join(video_path, video_name)],
+            'videos': os.path.join(video_path, video_name),     # not as a list
         }
 
     return dataset.map(_process).filter(lambda row: row['query'] is not None)

@@ -633,7 +633,8 @@ from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 
 @load_file_decorator
-def load_video_hierar_internvl(video_io: BytesIO, bound=None, num_segments=1, video_name=None):
+def load_video_hierar_internvl(video_io: BytesIO, bound=None, num_segments=1, video_name=None, use_diff_ways=False):
+    # 参数use_diff_ways的作用是Stage1-3训练时与筛选帧无关
     from decord import VideoReader, cpu
     from PIL import Image
     vr = VideoReader(video_io, ctx=cpu(0), num_threads=1)
@@ -642,18 +643,21 @@ def load_video_hierar_internvl(video_io: BytesIO, bound=None, num_segments=1, vi
 
     use_key_frames = False
     if not use_key_frames:
-        sec_len = round(max_frame / fps)
-        if sec_len > 160 and sec_len < 640:
-            frame_num = sec_len // 4        # 比如按照fps=4抽帧 产生40~160帧  (_post_encode中 乘以0.4得到16~64帧)
-            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frame_num)
-            len_type = 'long'
-        elif sec_len >= 640:
-            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=64)
-            len_type = 'ex_long'
+        if use_diff_ways:
+            sec_len = round(max_frame / fps)
+            if sec_len > 160 and sec_len < 640:
+                frame_num = sec_len // 4        # 比如按照fps=4抽帧 产生40~160帧  (_post_encode中 乘以0.4得到16~64帧)
+                frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frame_num)
+                len_type = 'long'
+            elif sec_len >= 640:
+                frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=64)
+                len_type = 'ex_long'
+            else:
+                frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16)
+                len_type = 'short'
         else:
-            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16)
-            len_type = 'short'
-        # frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16)
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16) # stage1-3都是抽16帧
+            len_type = None
 
     else:
         import time
@@ -668,7 +672,7 @@ def load_video_hierar_internvl(video_io: BytesIO, bound=None, num_segments=1, vi
         return [Image.fromarray(frame).convert('RGB') for frame in batch_frames]
     images = []
     # 使用 ThreadPoolExecutor 并行处理图像转换
-    with ThreadPoolExecutor(max_workers=4) as executor:  # 根据CPU核心数调整max_workers
+    with ThreadPoolExecutor(max_workers=4) as executor:
         # 将frame_indices分成若干batch处理
         for i in tqdm(range(0, len(frame_indices), batch_size), desc=f'loading {video_name}', disable=True):
             batch_indices = frame_indices[i : i + batch_size]
