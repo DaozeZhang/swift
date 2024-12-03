@@ -2711,7 +2711,7 @@ class HierarInternvl2Template(InternvlTemplate):
             shot_list, semantic_indices = model.get_shot_list(images)
             # plot_shot_split(images, shot_list, thumbnail_size=(32, 32), save_path='shot_split.jpg')
             keep_img_mask = model.filter_shots(vit_embeds, shot_list, semantic_indices, text_query_ids, text_query,
-                                                input_size, max_num, vit_device, model.dtype)
+                                                input_size, max_num, vit_device, model.dtype, self._is_training)
 
             assert sum(keep_img_mask) >= 16, f'sum(keep_img_mask) = {sum(keep_img_mask)} < 16.'
             # 使用 乘以mask 的方法 完成筛选
@@ -2785,6 +2785,8 @@ class HierarInternvl2Template(InternvlTemplate):
         selected = (input_ids == img_context_id)
         inputs_embeds[selected] = all_vit_embeds.reshape(-1, all_vit_embeds.shape[-1]).to(inputs_embeds.device)
         inputs['inputs_embeds'] = inputs_embeds
+
+        del inputs['images'], inputs['len_type'], inputs['text_query'], inputs['videos']
         return inputs 
 
 
