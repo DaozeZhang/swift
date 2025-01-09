@@ -250,7 +250,8 @@ def vlmeval_runner(args: EvalArguments, dataset: List[str], model_type: str, is_
                     'type': model_type,
                     'temperature': args.temperature,
                     'video_llm': True,
-                    'timeout': 360
+                    'timeout': 360,
+                    # 'img_size': 224,    # for MLVU
                 },
             ],
             **limit_config,

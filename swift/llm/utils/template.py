@@ -2510,6 +2510,10 @@ class Internvl2Template(InternvlTemplate):
         idx_list = _findall(input_ids, -100)
         labels = inputs.get('labels')
         images = example.get('images')
+        
+        print(f'Got {len(images)} frames.')
+        print(example)
+        
         if images:
             has_video = bool(example.get('videos'))
             input_size = get_env_args('input_size', int, 448)
@@ -2632,9 +2636,10 @@ class HierarInternvl2Template(InternvlTemplate):
                            'len_type': example['len_type'], 
                            'videos': example['videos']}    # 在调用层 会把_data送入post_encode
 
+        _, local_rank, _, local_world_size = get_dist_setting()
         if self.model.config.use_diff_ways:
             if self._is_training and example['len_type'] != 'long': # 这两行仅在三岔路中的模块(mlp_for_shot_select)被训练时使用 用于保证每次计算图一致
-                logger.info(f'Skip this data sample when training, to ensure the match between computation graphs. Video:' + str(example['videos']))
+                print(f'[rank:{local_rank}] Skip this data sample when training, to ensure the match between computation graphs. Video:' + str(example['videos']))
                 return {}, {}
 
             pattern = r"<\|im_start\|>\s*user\s*\n\s*(.*?)\s*<\|im_end\|>"
@@ -2643,6 +2648,14 @@ class HierarInternvl2Template(InternvlTemplate):
             text_query = ' '.join([re.sub(r"<IMG_CONTEXT>", "", t).strip() for t in queries])    # 去除前后空白符 并过滤掉<IMG_CONTEXT>
 
             inputs['_data']['text_query'] = text_query
+        
+        ids_len_wo_v_tokens = len(input_ids)
+        if not self.model.config.use_diff_ways:     # 本段代码仅在Stage1-3使用
+            max_seq_len_w_vis = 9500                # 使用deepspeed时限制最终长度不超过9500 # 自己的八卡只能改为8800
+            if self._is_training and ids_len_wo_v_tokens > max_seq_len_w_vis - 60 * (128+3):
+                print(f'\n[rank:{local_rank}] Skip this data sample when training, it contains {ids_len_wo_v_tokens} tokens and will exceed {max_seq_len_w_vis} after inserting the visual tokens.')
+                print(f'This data: {self.tokenizer.decode(input_ids)}\n')
+                return {}, {}   # 至于Stage4变长度训练时该怎么限制 就到时候再写吧
 
         return inputs, {}
 
@@ -2689,7 +2702,7 @@ class HierarInternvl2Template(InternvlTemplate):
         inputs['labels'] = labels
         inputs['hierar_mode'] = hierar_mode
         inputs['level_sizes'] = level_sizes
-        return inputs
+        return inputs, len(res)
 
     def _post_encode(self, model, data: Any) -> Dict[str, Any]:     # _encode()当中给_data字段写入的内容 即为这里的data
         input_ids, labels, images, len_type = data['input_ids'], data['labels'], data['images'], data['len_type']
@@ -2703,11 +2716,14 @@ class HierarInternvl2Template(InternvlTemplate):
         input_size = get_env_args('input_size', int, 448)
         max_num = get_env_args('max_num', int, 1 if has_video else 12)
 
-        pixel_values = [transform_image(image, input_size, max_num) for image in images]
-        num_patches = [pv.shape[0] for pv in pixel_values]
-        pixel_values = torch.cat(pixel_values, dim=0)              # [ori_img_num, 3, input_size=448, input_size]
-        pixel_values = pixel_values.to(self.model.dtype).to(vit_device)
-    
+        try:
+            pixel_values = [transform_image(image, input_size, max_num) for image in images]
+            num_patches = [pv.shape[0] for pv in pixel_values]
+            pixel_values = torch.cat(pixel_values, dim=0)              # [ori_img_num, 3, input_size=448, input_size]
+            pixel_values = pixel_values.to(self.model.dtype).to(vit_device)
+        except Exception as e:
+            print(f"{e}")
+
         vit_embeds = model.extract_feature(pixel_values, include_tree_conv=False).to(device=vit_device) # [ori_img_num, frm_token_num, vit_dim]
 
         if not self.model.config.use_diff_ways:
@@ -2757,7 +2773,7 @@ class HierarInternvl2Template(InternvlTemplate):
         has_img_vid_token = input_img_num != 0
         if has_img_vid_token:
             # inputs = self.insert_coaser_img(inputs=inputs, nframes=input_img_num)  # 把data里 input_ids中视频位置替换为很多个<IMG_CONTEXT> labels也相应替换
-            inputs = self.insert_all_img(inputs=inputs, nframes=ori_img_num)  # 把data里 input_ids中视频位置替换为很多个<IMG_CONTEXT> labels也相应替换
+            inputs, v_token_len = self.insert_all_img(inputs=inputs, nframes=ori_img_num)  # 把data里 input_ids中视频位置替换为很多个<IMG_CONTEXT> labels也相应替换
         else:
             inputs['hierar_mode'], inputs['level_sizes'] = 'pure_text_input', None
         
@@ -2803,6 +2819,11 @@ class HierarInternvl2Template(InternvlTemplate):
 
         del inputs['images'], inputs['len_type'], inputs['videos']
         inputs.pop('text_query', None)
+
+        _, local_rank, _, local_world_size = get_dist_setting()
+        print(f'[rank:{local_rank}] len(input_ids) = {len(input_ids)}, in which {v_token_len} are visual tokens.')
+        # gc.collect()
+        # torch.cuda.empty_cache()
         return inputs 
 
 
@@ -2819,6 +2840,7 @@ class HierarInternvl2Template(InternvlTemplate):
         res['hierar_mode'] = batch[0]['hierar_mode']
         res['input_ids'] = [b['input_ids'] for b in batch]      # bsz>1则可能无法concat
         res['input_ids_bak'] = [b['input_ids_bak'] for b in batch]      # bsz>1则可能无法concat
+        res['level_sizes'] = torch.cat([ torch.tensor(b['level_sizes']).unsqueeze(0) for b in batch], dim=0)
         # construct the attention_mask
         input_ids = res['input_ids']
         att_mask = [torch.ones((len(input_ids[i]), len(input_ids[i])), dtype=torch.int64)

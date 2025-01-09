@@ -656,7 +656,7 @@ def load_video_hierar_internvl(video_io: BytesIO, bound=None, num_segments=1, vi
                 frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16)
                 len_type = 'short'
         else:
-            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16) # stage1-3都是抽16帧
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=32) # stage1-3都是抽32帧
             len_type = None
 
     else:
@@ -809,7 +809,7 @@ def load_video_qwen2(video_path: str):
     if not (size_factor <= nframes and nframes <= video.size(0)):
         raise ValueError(f'nframes should in interval [{size_factor}, {video.size(0)}], but got {nframes}.')
 
-    use_key_frames = True
+    use_key_frames = False
     fps = info['video_fps']
     if not use_key_frames:
         idx = torch.linspace(0, video.size(0) - 1, nframes).round().long()

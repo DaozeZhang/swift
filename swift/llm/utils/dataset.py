@@ -191,8 +191,11 @@ class DatasetName:
     vnbench = 'vnbench'
     lvbench = 'lvbench'
     mlvu_valid = 'mlvu-valid'
+    mlvu_valid_gene = 'mlvu-valid-gene'
     mlvu_test = 'mlvu-test'
     long_video_bench_valid = 'long-video-bench-valid'
+    event_bench = 'event-bench'
+    youcook2_val = 'youcook2-val'
 
     # rlhf
     hh_rlhf = 'hh-rlhf'
@@ -911,10 +914,11 @@ register_dataset(
 
 
 def _preprocess_egoschema(dataset: DATASET_TYPE) -> DATASET_TYPE:
-    for i in range(1, 6):
-        url = f'https://modelscope.cn/datasets/AI-ModelScope/egoschema/resolve/master/videos_chunked_0{i}.zip'
-        local_dir = MediaCache.download(url, 'egoschema')
+    # for i in range(1, 6):
+    #     url = f'https://modelscope.cn/datasets/AI-ModelScope/egoschema/resolve/master/videos_chunked_0{i}.zip'
+    #     local_dir = MediaCache.download(url, 'egoschema')
 
+    local_dir = '/mnt/nas1/.cache/modelscope/media_resources/egoschema' # 读取已经下载好的 为了DLC 因为DLC没有workspace会自动下载到/root/.cache
     local_dir = os.path.join(local_dir, 'videos')
     mp4_set = [file[:-4] for file in os.listdir(local_dir) if file.endswith('mp4')]
 
@@ -949,7 +953,7 @@ register_dataset(
 
 def preprocess_llava_video_178k(dataset: DATASET_TYPE, subset, dataset_id) -> DATASET_TYPE:
     
-    dataset_dir = '/mnt/workspace/.cache/modelscope/datasets'   # YOUR PATH TO `lmms-lab` directory
+    dataset_dir = '/mnt/nas1/.cache/modelscope/datasets'   # YOUR PATH TO `lmms-lab` directory
     local_dir = f'{dataset_dir}/{dataset_id}/{subset}/'    
     
     if not os.path.exists(local_dir):
@@ -1047,9 +1051,11 @@ def _preprocess_moviechat_1k_test(dataset: DATASET_TYPE) -> DATASET_TYPE:
               [f'BWH-{i}.mp4' for i in range(1, 6)] + \
               [f'TFS-{i}.mp4' for i in range(1, 13)] + \
               [f'UWA-{i}.mp4' for i in range(1, 5)] + ['UWA-6.mp4']
-    for file in mp4_set:
-        url = f'https://modelscope.cn/datasets/AI-ModelScope/MovieChat-1K-test/resolve/master/videos/{file}'
-        local_dir = MediaCache.download(url, f'moviechat_1k_test', is_not_compressed_file=True)
+    # for file in mp4_set:
+    #     url = f'https://modelscope.cn/datasets/AI-ModelScope/MovieChat-1K-test/resolve/master/videos/{file}'
+    #     local_dir = MediaCache.download(url, f'moviechat_1k_test', is_not_compressed_file=True)
+
+    local_dir = '/mnt/nas1/.cache/modelscope/media_resources/moviechat_1k_test' # 读取已经下载好的 为了DLC 因为DLC没有workspace会自动下载到/root/.cache
 
     def _process(batch):    # bsz==1
         file_path = os.path.join(local_dir, f"{batch['info'][0]['video_path']}")
@@ -1073,7 +1079,7 @@ def _preprocess_moviechat_1k_test(dataset: DATASET_TYPE) -> DATASET_TYPE:
 
 register_dataset(
     DatasetName.moviechat_1k_test,
-    'AI-ModelScope/MovieChat-1K-test', None,
+    '/mnt/nas1/daoze/repo/MovieChat-1K-test', None,
     _preprocess_moviechat_1k_test,
     get_dataset_from_repo,
     split=['train'],
@@ -1124,10 +1130,51 @@ register_dataset(
 
 
 def _preprocess_video_mme(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    def filter_dataset(dataset):
+        import random
+        short_items, medium_items, long_items = [], [], []
+        for item in tqdm(dataset, desc='filtering video-mme'):
+            duration = item.get('duration')
+            if duration == 'short':
+                short_items.append(item)
+            elif duration == 'medium':
+                medium_items.append(item)
+            elif duration == 'long':
+                long_items.append(item)
+        
+        num_medium = int(len(medium_items) * 0.85)
+        num_long = int(len(long_items) * 0.60)
+        
+        medium_sample = random.sample(medium_items, num_medium) if num_medium > 0 else []
+        long_sample = random.sample(long_items, num_long) if num_long > 0 else []
+        
+        dict_list = short_items + medium_sample + long_sample
+        return dict_list
+    
+    def get_type_num(dataset):
+        ori_short_n = sum([1 if d['duration']=='short' else 0 for d in dataset])
+        ori_medium_n = sum([1 if d['duration']=='medium' else 0 for d in dataset])
+        ori_long_n = sum([1 if d['duration']=='long' else 0 for d in dataset])
+        return ori_short_n, ori_medium_n, ori_long_n
+
     # 需要手动下载数据集并解压
     video_path = f'/mnt/nas1/daoze/repo/Video-MME/data'
     
     mp4_set = [file[:-4] for file in os.listdir(video_path) if file.endswith('mp4')]
+    
+    ### 数据配比
+    assert len(dataset) == 2673 or len(dataset) == 27, f'len(dataset) = {len(dataset)}'
+    if len(dataset) == 2673:
+        ori_short_n, ori_medium_n, ori_long_n = get_type_num(dataset)
+
+        dict_list = filter_dataset(dataset)
+
+        import pandas as pd
+        dataset = HfDataset.from_pandas(pd.DataFrame(dict_list))
+
+        short_n, medium_n, long_n = get_type_num(dataset)
+        print(f'Video-MME 数据配比已开启. Short: {ori_short_n}->{short_n}, Medium: {ori_medium_n}->{medium_n}, Long: {ori_long_n}->{long_n}')
+    ###
 
     def _process(d):
         if d['videoID'] not in mp4_set:
@@ -1153,7 +1200,7 @@ register_dataset(
 
 def _preprocess_mlvu_valid(dataset: DATASET_TYPE) -> DATASET_TYPE:
     video_dir = '/mnt/nas1/daoze/repo/MLVU/MLVU/video'  # 从本地读视频文件
-    subdirs = {'plotQA': 1, 'needle' : 2, 'ego':3, 'count': 4, 'order': 5, 'anomaly_reco': 6, 'topic_reasoning':7}  # 8和9的列和前面不匹配 去掉
+    subdirs = {'plotQA': 1, 'needle' : 2, 'ego':3, 'count': 4, 'order': 5, 'anomaly_reco': 6, 'topic_reasoning':7}  # 8和9的列和前面不匹配 是生成任务 去掉
     mp4_set = []
     for subdir in subdirs.keys():
         path = f'{video_dir}/{subdirs[subdir]}_{subdir}'
@@ -1180,6 +1227,79 @@ register_dataset(
     None,
     _preprocess_mlvu_valid,
     get_dataset_from_repo,
+    split=['train'],
+    huge_dataset=True,
+    tags=['chat', 'multi-modal', 'video'])
+
+
+
+def get_dataset_mlvu_valid_gene(dataset_id: str,
+                                subsets: Optional[List[str]],
+                                preprocess_func: PreprocessFunc,
+                                split: List[str],
+                                dataset_sample: int = -1,
+                                *,
+                                random_state: Optional[RandomState] = None,
+                                dataset_test_ratio: float = 0.,
+                                remove_useless_columns: bool = True,
+                                use_hf: bool = False,
+                                **kwargs) -> Tuple[DATASET_TYPE, Optional[DATASET_TYPE]]:
+    streaming = kwargs.get('streaming', False)
+    if subsets is None:
+        subsets = []
+    assert len(split) > 0
+    if len(subsets) == 0:
+        subset_split_list = split
+    else:
+        subset_split_list = list(itertools.product(subsets, split))
+
+    with open('/mnt/nas1/daoze/repo/MLVU_gene/8_sub_scene.json', 'r', encoding='utf-8') as f:
+        dict_list_1 = json.load(f)
+    with open('/mnt/nas1/daoze/repo/MLVU_gene/9_summary.json', 'r', encoding='utf-8') as f:
+        dict_list_2 = json.load(f)
+    
+    for d in dict_list_1:
+        d.pop('scoring_points')
+    assert dict_list_1[0].keys() == dict_list_2[0].keys()
+
+    dict_list = dict_list_1 + dict_list_2
+
+    import pandas as pd
+    dataset = HfDataset.from_pandas(pd.DataFrame(dict_list))
+
+    return _post_preprocess(dataset, dataset_sample, random_state, preprocess_func, dataset_test_ratio,
+                            remove_useless_columns, **kwargs)
+
+
+def _preprocess_mlvu_valid_gene(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    video_dir = '/mnt/nas1/daoze/repo/MLVU/MLVU/video'  # 从本地读视频文件
+    subdirs = {'sub_scene': 8, 'summary': 9}  # 8和9是生成任务
+    mp4_set = []
+    for subdir in subdirs.keys():
+        path = f'{video_dir}/{subdirs[subdir]}_{subdir}'
+        mp4_set += [file for file in os.listdir(path) if file.endswith('mp4')]
+
+    def _process(d):
+        video = d['video']
+        subdir = d['question_type']
+        subdir = 'sub_scene' if subdir == 'subPlot' else subdir
+
+        if video not in mp4_set or subdir not in ['sub_scene', 'summary']:
+            return {'query': None, 'response': None, 'videos': None} 
+        return {
+            'query': d['question'],
+            'response': d['answer'],
+            'videos': os.path.join(f'{video_dir}/{subdirs[subdir]}_{subdir}', f"{video}"),
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.mlvu_valid_gene,
+    '/mnt/nas1/daoze/repo/MLVU_gene',
+    None,
+    _preprocess_mlvu_valid_gene,
+    get_dataset_mlvu_valid_gene,
     split=['train'],
     huge_dataset=True,
     tags=['chat', 'multi-modal', 'video'])
@@ -1227,7 +1347,7 @@ def convert_long_video_bench_valid(dataset,):
         }
 
     ds_len = len(dataset)   # 100 for DEBUG
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         dict_list = list(tqdm(executor.map(process_item, range(ds_len)), total=ds_len, desc='Converting LongVideoBench-valid Data...'))
     return dict_list
 
@@ -1388,6 +1508,146 @@ register_dataset(
     huge_dataset=False,
     tags=['chat', 'multi-modal', 'video'])
 
+
+def _preprocess_event_bench(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    def filter_dataset(dataset):
+        import random
+        counter, context, episodic, others = [], [], [], []
+        for item in tqdm(dataset, desc='filtering event-bench'):
+            task = item.get('task')
+            if task == 'Counter-intuitive Reasoning':
+                counter.append(item)
+            elif task == 'Contextual Reasoning':
+                context.append(item)
+            elif task == 'Episodic Reasoning':
+                episodic.append(item)
+            else:
+                others.append(item)
+        
+        num_counter = int(len(counter) * 0.30)
+        num_context = int(len(context) * 0.30)
+        num_episodic = int(len(episodic) * 0.30)
+        num_others = int(len(others) * 0.60)
+        
+        counter_sample = random.sample(counter, num_counter) if num_counter > 0 else []
+        context_sample = random.sample(context, num_context) if num_context > 0 else []
+        episodic_sample = random.sample(episodic, num_episodic) if num_episodic > 0 else []
+        others_sample = random.sample(others, num_others) if num_others > 0 else []
+        
+        dict_list = others_sample + counter_sample + context_sample + episodic_sample
+        return dict_list
+
+    def get_type_num(dataset):
+        ori_counter_n = sum([1 if d['task']=='Counter-intuitive Reasoning' else 0 for d in dataset])
+        ori_context_n = sum([1 if d['task']=='Contextual Reasoning' else 0 for d in dataset])
+        ori_episodic_n = sum([1 if d['task']=='Episodic Reasoning' else 0 for d in dataset])
+        ori_others_n = len(dataset) - ori_counter_n - ori_context_n - ori_episodic_n
+        return ori_counter_n, ori_context_n, ori_episodic_n, ori_others_n
+
+    video_path = f'/mnt/nas1/daoze/repo/Event-Bench-data/'
+    mp4_set = []
+    for dirpath, dirnames, filenames in os.walk(video_path):
+        for filename in filenames:
+            if filename.endswith('mp4'):
+                file_path = os.path.join(dirpath, filename)
+                v_name = '/'.join( file_path.split('/')[7:] )
+                mp4_set.append(v_name)
+    
+    ### 数据配比
+    assert len(dataset) == 2169 or len(dataset) == 21, f'len(dataset) = {len(dataset)}'
+    if len(dataset) == 2169:
+        ori_counter_n, ori_context_n, ori_episodic_n, ori_others_n = get_type_num(dataset)
+        dict_list = filter_dataset(dataset)
+
+        import pandas as pd
+        dataset = HfDataset.from_pandas(pd.DataFrame(dict_list))
+
+        counter_n, context_n, episodic_n, others_n = get_type_num(dataset)
+        print(f'Event-Bench 数据配比已开启. Counter: {ori_counter_n}->{counter_n}, Context: {ori_context_n}->{context_n}, Episodic: {ori_episodic_n}->{episodic_n}, Others: {ori_others_n}->{others_n}')
+    ###
+
+    def _process(d):
+        video_name = '/'.join( d['video'].split('/')[1:] )
+        if video_name not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        options = ['A', 'B', 'C', 'D', 'E', 'F', 'G']   # 应该只有ABCDE
+        candidates = d['candidates']
+        for i in range(len(candidates)):
+            if candidates[i] == d['answer']:
+                opt = options[i]
+            candidates[i] =  options[i] + ". " + candidates[i]
+        return {
+            'query': d['question'] + '\n' + '\n'.join(candidates) + "\nAnswer with the option's letter from the given choices directly.",
+            'response': opt,
+            'videos': os.path.join('/mnt/nas1/daoze/repo/Event-Bench-data/Event-Bench', video_name),     # not as a list
+        }
+
+    return dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.event_bench,
+    'AI-ModelScope/Event-Bench',
+    None,
+    _preprocess_event_bench,
+    get_dataset_from_repo,
+    split=['test'],
+    huge_dataset=False,
+    tags=['chat', 'multi-modal', 'video'])
+
+
+
+def _preprocess_youcook2_val(dataset: DATASET_TYPE) -> DATASET_TYPE:
+    video_path = f'/mnt/nas1/daoze/repo/YouCook2/YouCookIIVideos/val_clips_merged/'
+    mp4_set = [file for file in os.listdir(video_path) if file.endswith('mp4')]
+
+    ### 该数据集的多个数据样本对应一个视频 是这个视频的多个步骤 将它们组合成一个样本
+    df = dataset.to_pandas()
+    # 筛选出所有youtube_id重复的样本
+    duplicate_ids = df['youtube_id'][df['youtube_id'].duplicated(keep=False)].unique()
+    duplicates_df = df[df['youtube_id'].isin(duplicate_ids)]
+    # 对于youtube_id相同的各个样本 合并它们的'sentence'字段 用分号连接多个步骤
+    merged_df = duplicates_df.groupby('youtube_id').agg({
+        'sentence': '; '.join,
+    }).reset_index()
+
+    merged_dataset = HfDataset.from_pandas(merged_df)
+
+    import random
+    queries = [
+        'Please describe each step in making the dish in the video.',
+        'Please provide a step-by-step explanation of how the food is made in the video.',
+        'Can you explain each step necessary for making the dish as demonstrated in the video?',
+        'Kindly outline all the steps taken to create the dish featured in the video.',
+        'Would you please describe the procedure for cooking shown in the video, step by step?',
+        'Please elaborate on every phase of preparing the food depicted in the video.',
+        'Could you break down each step involved in the preparation of the dish illustrated in the video?',
+        'Would you mind detailing each stage involved in cooking presented in the video?',
+    ]
+    def polish_resp(resp):
+        resp = resp.strip()
+        return resp[0].upper() + resp[1:] + '.'
+    def _process(d):
+        video_name = d['youtube_id'] + '_merged.mp4'
+        if video_name not in mp4_set:
+            return {'query': None, 'response': None, 'videos': None}
+        
+        return {
+            'query': random.choice(queries),
+            'response': polish_resp(d['sentence']),
+            'videos': os.path.join(video_path, video_name),     # not as a list
+        }
+
+    return merged_dataset.map(_process).filter(lambda row: row['query'] is not None)
+
+register_dataset(
+    DatasetName.youcook2_val,
+    'lmms-lab/YouCook2',
+    None,
+    _preprocess_youcook2_val,
+    get_dataset_from_repo,
+    split=['val'],
+    huge_dataset=False,
+    tags=['chat', 'multi-modal', 'video'])
 
 
 def _preprocess_activitynetqa(dataset: DATASET_TYPE) -> DATASET_TYPE:

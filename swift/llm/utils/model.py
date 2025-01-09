@@ -420,6 +420,8 @@ class ModelType:
     hierar_internvl2_2b = 'hierar_internvl2-2b'
     hierar_internvl2_8b = 'hierar_internvl2-8b'
 
+    internvl2_5_8b = 'internvl2_5-8b'
+
     # deepseek
     deepseek_7b = 'deepseek-7b'
     deepseek_7b_chat = 'deepseek-7b-chat'
@@ -4736,6 +4738,19 @@ def get_model_tokenizer_deepseek2(model_dir: str,
     placeholder_tokens=['<IMG_CONTEXT>'],
     tags=['multi-modal', 'vision', 'video'],
     hf_model_id='OpenGVLab/InternVL2-Llama3-76B-AWQ')
+@register_model(
+    ModelType.internvl2_5_8b,
+    'OpenGVLab/InternVL2_5-8B',
+    LoRATM.internvl,
+    TemplateType.internvl2,
+    requires=['transformers>=4.36', 'timm'],
+    ignore_file_pattern=[r'.+\.zip$'],
+    support_flash_attn=True,
+    support_lmdeploy=True,
+    support_vllm=True,
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision', 'video'],
+    hf_model_id='OpenGVLab/InternVL2_5-8B')
 def get_model_tokenizer_internvl(model_dir: str,
                                  torch_dtype: torch.dtype,
                                  model_kwargs: Dict[str, Any],
@@ -7101,7 +7116,7 @@ def fix_transformers_upgrade(module: PreTrainedModel) -> None:
             module._set_gradient_checkpointing = MethodType(PreTrainedModel._set_gradient_checkpointing, module)
 
 
-def fix_gradient_checkpointing_warning(is_moe: bool = False) -> None:
+def fix_gradient_checkpointing_warning(is_moe: bool = False, unconditional_reentrant = False) -> None:
     torch_version = version.parse(torch.__version__)
     if torch_version < version.parse('2'):
         return
@@ -7110,6 +7125,9 @@ def fix_gradient_checkpointing_warning(is_moe: bool = False) -> None:
         _use_reentrant = True
     else:
         _use_reentrant = is_moe
+    
+    _use_reentrant = _use_reentrant or unconditional_reentrant    # only when deepspeed
+
     _old_checkpoint = torch.utils.checkpoint.checkpoint
     if not hasattr(torch.utils.checkpoint, '_old_checkpoint'):  # avoid double patching
 
@@ -7259,7 +7277,10 @@ def get_model_tokenizer(model_type: str,
         fix_transformers_upgrade(model)
 
     is_moe = '-moe' in model_type or 'moe' in model_info.get('tags', [])
-    fix_gradient_checkpointing_warning(is_moe)
+    
+    use_reentrant = True if 'hierar_internvl2' in model_type else False
+    
+    fix_gradient_checkpointing_warning(is_moe, unconditional_reentrant=use_reentrant)
     tokenizer.model_type = model_type
     tokenizer.model_dir = model_dir
     tokenizer.is_multimodal = is_multimodal
