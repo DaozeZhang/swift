@@ -4853,7 +4853,7 @@ def get_custom_device_map(n_gpu, local_world_size, local_rank):
 
 @register_model(
     ModelType.hierar_internvl2_2b,
-    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B-tvm',
+    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-2B-triton',
     LoRATM.internvl,
     TemplateType.hierar_internvl2,
     requires=['transformers>=4.36', 'timm'],
@@ -4866,7 +4866,7 @@ def get_custom_device_map(n_gpu, local_world_size, local_rank):
     hf_model_id='OpenGVLab/InternVL2-2B')
 @register_model(
     ModelType.hierar_internvl2_8b,
-    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-8B-tvm',
+    '/mnt/nas1/daoze/code/hierar_internvl2/InternVL2-8B-triton',
     LoRATM.internvl,
     TemplateType.hierar_internvl2,
     requires=['transformers>=4.36', 'timm'],
