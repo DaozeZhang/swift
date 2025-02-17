@@ -205,6 +205,36 @@ register_model(
         tags=['vision', 'video'],
     ))
 
+
+def get_model_tokenizer_sophia(model_dir: str,
+                               model_info: ModelInfo,
+                               model_kwargs: Dict[str, Any],
+                               load_model: bool = True,
+                               **kwargs):
+    model, tokenizer = get_model_tokenizer_internvl(model_dir, model_info, model_kwargs, load_model, **kwargs)
+    
+    if model.config.use_diff_ways:
+        import torch
+        model.shot_detector.to(torch.float32)     # the infer of TransNetV2 must in float32 
+    return model, tokenizer
+
+register_model(
+    ModelMeta(
+        MLLMModelType.sophia,
+        [
+            ModelGroup([
+                Model('DaozeZhang/Sophia', 'DaozeZhang/Sophia', '/mnt/nas1/daoze/code/Sophia'),
+            ]),
+        ],
+        TemplateType.sophia,
+        get_model_tokenizer_sophia,
+        architectures=['InternVLChatModel'],
+        model_arch=ModelArch.internvl,
+        requires=['transformers>=4.34', 'timm'],
+        tags=['vision', 'video'],
+    ))
+
+
 register_model(
     ModelMeta(
         MLLMModelType.internvl2_phi3,

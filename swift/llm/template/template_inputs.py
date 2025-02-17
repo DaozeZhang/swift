@@ -243,3 +243,8 @@ class StdTemplateInputs:
                 messages.pop(i)  # remove tool
             else:
                 i += 1
+
+
+@dataclass
+class SophiaTemplateInputs(StdTemplateInputs):
+    len_type: str = None    # the length type of the loaded video

@@ -102,9 +102,12 @@ class SwiftEval(SwiftPipeline):
                     'name': 'CustomAPIModel',
                     'api_base': url,
                     'key': args.api_key or 'EMPTY',
+                    'video_llm': True,
+                    'timeout': 360,
                 }],
                 'nproc':
                 args.eval_num_proc or 16,
+                'nframe': 32
             }
         }
         task_cfg['work_dir'] = task_cfg['eval_config']['work_dir']  # compat evalscope 0.8.1

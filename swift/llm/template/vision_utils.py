@@ -179,6 +179,55 @@ def transform_image(image, input_size=448, max_num=12):
     return pixel_values
 
 
+def get_hierar_mask(bottom_size, array_sizes, neibor_size, device, put_coaser_ahead):
+    """Get the attention mask of PAM-Naive"""
+    input_size = bottom_size
+    window_size = array_sizes
+    inner_size = neibor_size
+
+    # Get the size of all layers
+    all_size = []
+    all_size.append(input_size)
+    for i in range(len(window_size)):
+        layer_size = math.floor(all_size[i] / window_size[i])   # window_size是[4,4,4]的列表 构造四叉树 共构造三层
+        all_size.append(layer_size)
+    # all_size是[168, 42, 10, 2]的列表 即各层的节点数
+    seq_length = sum(all_size)  # all_size=222 即所有节点数
+    mask = torch.zeros(seq_length, seq_length, device=device)   # 先把mask构造成222*222的全0矩阵
+
+    # get intra-scale mask 把同层邻居的mask位置设为1
+    inner_window = inner_size // 2  # inner_size是 某个点能attend到同层的多少个邻居 inner_window即为一半
+    for layer_idx in range(len(all_size)):
+        start = sum(all_size[:layer_idx])
+        for i in range(start, start + all_size[layer_idx]): # 对于0~222当中 第layer_idx层的那些索引值
+            left_side = max(i - inner_window, start)
+            right_side = min(i + inner_window + 1, start + all_size[layer_idx])
+            mask[i, left_side:right_side] = 1
+
+    # get inter-scale mask 把父子间连接的mask位置设为1
+    for layer_idx in range(1, len(all_size)):
+        start = sum(all_size[:layer_idx])
+        for i in range(start, start + all_size[layer_idx]):
+            left_side = (start - all_size[layer_idx - 1]) + (i - start) * window_size[layer_idx - 1]
+            if i == ( start + all_size[layer_idx] - 1):
+                right_side = start
+            else:
+                right_side = (start - all_size[layer_idx - 1]) + (i - start + 1) * window_size[layer_idx - 1]
+            mask[i, left_side:right_side] = 1
+            mask[left_side:right_side, i] = 1
+
+    if put_coaser_ahead:
+        coaser_size = sum(all_size[1:])
+        new_mask = torch.zeros_like(mask)
+        new_mask[-input_size:, -input_size:] = mask[:input_size, :input_size]
+        new_mask[:coaser_size, :coaser_size] = mask[-coaser_size:, -coaser_size:]
+        new_mask[:coaser_size, -input_size:] = mask[-coaser_size:, :input_size]
+        new_mask[-input_size:, :coaser_size] = mask[:input_size, -coaser_size:]
+        return new_mask, all_size
+    
+    return mask, all_size
+    
+
 @load_file_decorator
 def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     from decord import VideoReader, cpu
@@ -190,7 +239,89 @@ def load_video_internvl(video_io: BytesIO, bound=None, num_segments=32):
     frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
     for frame_index in frame_indices:
         images.append(Image.fromarray(vr[frame_index].asnumpy()).convert('RGB'))
+    
+    if get_env_args('niah', bool, False):
+        # To conduct the NIAH exp, insert the needle
+        sample = get_env_args('sample', int, 1)
+        if sample == 1:   needle_img_path = '/mnt/nas1/daoze/needle_landmark.png'     # needle of sample1 
+        elif sample == 2: needle_img_path = '/mnt/nas1/daoze/needle_banana.png'       # needle of sample2 
+        elif sample == 3: needle_img_path = '/mnt/nas1/daoze/needle_mango.png'        # needle of sample3 
+        elif sample == 4: needle_img_path = '/mnt/nas1/daoze/needle_strawberry.png'   # needle of sample4 
+        needle_img = Image.open(needle_img_path)
+        needle_img = needle_img.convert('RGB').resize(images[0].size)
+        num_images = len(images)
+        percentage = get_env_args('needle_percent', float, 1)    # 0-1 
+        index = math.floor(percentage * num_images)
+        if index < 0:            index = 0
+        elif index > num_images: index = num_images
+        images.insert(index, needle_img)
+        print(f'needle at the {index} of {len(images)} inserted')
+
     return images
+
+
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
+
+@load_file_decorator
+def load_video_sophia(video_io: BytesIO, bound=None, frm_num=8, video_name=None, use_diff_ways=False):
+    # 参数use_diff_ways的作用是Stage1-3训练时与筛选帧无关
+    from decord import VideoReader, cpu
+    from PIL import Image
+    vr = VideoReader(video_io, ctx=cpu(0), num_threads=1)
+    max_frame = len(vr) - 1
+    fps = float(vr.get_avg_fps())
+
+    if use_diff_ways:
+        sec_len = round(max_frame / fps)
+        if sec_len > 160 and sec_len < 640:
+            frame_num = sec_len // 4        # 比如按照fps=4抽帧 产生40~160帧  (_post_encode中 乘以0.4得到16~64帧)
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frame_num)
+            len_type = 'long'
+        elif sec_len >= 640:
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=64)
+            len_type = 'ex_long'
+        else:
+            frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=16)
+            len_type = 'short'
+    else:
+        frame_indices = _get_index(bound, fps, max_frame, first_idx=0, num_segments=frm_num) # stage1-3都是抽32帧
+        len_type = None
+    
+    batch_size = 40 # 每batch_size个帧开一个线程做转换 到PIL.Image
+    # 转为RGB
+    def process_batch(batch_frames):
+        return [Image.fromarray(frame).convert('RGB') for frame in batch_frames]
+    images = []
+    # 使用 ThreadPoolExecutor 并行处理图像转换
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        # 将frame_indices分成若干batch处理
+        for i in tqdm(range(0, len(frame_indices), batch_size), desc=f'loading {video_name}', disable=True):
+            batch_indices = frame_indices[i : i + batch_size]
+            # 批量获取帧
+            batch_frames = vr.get_batch(batch_indices).asnumpy()
+            # 提交图像转换任务
+            images_batch = executor.submit(process_batch, batch_frames)
+            images.extend(images_batch.result())
+
+    if get_env_args('niah', bool, False):
+        # To conduct the NIAH exp, insert the needle
+        sample = get_env_args('sample', int, 1)
+        if sample == 1:   needle_img_path = '/mnt/nas1/daoze/needle_landmark.png'     # needle of sample1 
+        elif sample == 2: needle_img_path = '/mnt/nas1/daoze/needle_banana.png'       # needle of sample2 
+        elif sample == 3: needle_img_path = '/mnt/nas1/daoze/needle_mango.png'        # needle of sample3 
+        elif sample == 4: needle_img_path = '/mnt/nas1/daoze/needle_strawberry.png'   # needle of sample4 
+        needle_img = Image.open(needle_img_path)
+        needle_img = needle_img.convert('RGB').resize(images[0].size)
+        num_images = len(images)
+        percentage = get_env_args('needle_percent', float, 1)    # 0-1 
+        index = math.floor(percentage * num_images)
+        if index < 0:            index = 0
+        elif index > num_images: index = num_images
+        images.insert(index, needle_img)
+        print(f'needle at the {index} of {len(images)} inserted')
+
+    return images, len_type
 
 
 def draw_plot(img_dir: str, bbox: List[int], bbox_type: str, output_file: str):
